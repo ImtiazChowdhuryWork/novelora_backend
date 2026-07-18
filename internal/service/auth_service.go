@@ -12,13 +12,16 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/api/idtoken"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 )
 
 var (
-	ErrInvalidCredentials  = errors.New("invalid email or password")
-	ErrInvalidRefreshToken = errors.New("refresh token is invalid or expired")
+	ErrInvalidCredentials       = errors.New("invalid email or password")
+	ErrInvalidRefreshToken      = errors.New("refresh token is invalid or expired")
+	ErrInvalidGoogleToken       = errors.New("google sign-in token is invalid")
+	ErrGoogleLoginNotConfigured = errors.New("google sign-in is not configured on this server")
 )
 
 // ValidationError reports invalid user input; handlers map it to 400.
@@ -44,6 +47,7 @@ type AuthService struct {
 	jwtSecret       []byte
 	accessTokenTTL  time.Duration
 	refreshTokenTTL time.Duration
+	googleClientID  string
 }
 
 func NewAuthService(
@@ -52,6 +56,7 @@ func NewAuthService(
 	jwtSecret []byte,
 	accessTokenTTL time.Duration,
 	refreshTokenTTL time.Duration,
+	googleClientID string,
 ) *AuthService {
 	return &AuthService{
 		users:           users,
@@ -59,6 +64,7 @@ func NewAuthService(
 		jwtSecret:       jwtSecret,
 		accessTokenTTL:  accessTokenTTL,
 		refreshTokenTTL: refreshTokenTTL,
+		googleClientID:  googleClientID,
 	}
 }
 
@@ -109,6 +115,120 @@ func (authService *AuthService) Login(ctx context.Context, email, password strin
 		return nil, ErrInvalidCredentials
 	}
 	return authService.issueTokens(ctx, user)
+}
+
+// LoginWithGoogle verifies a Google ID token and signs the account in,
+// creating the user or linking the Google account as needed.
+func (authService *AuthService) LoginWithGoogle(ctx context.Context, googleIDToken string) (*AuthResult, error) {
+	if authService.googleClientID == "" {
+		return nil, ErrGoogleLoginNotConfigured
+	}
+
+	payload, err := idtoken.Validate(ctx, googleIDToken, authService.googleClientID)
+	if err != nil {
+		return nil, ErrInvalidGoogleToken
+	}
+
+	googleAccountID := payload.Subject
+	email, _ := payload.Claims["email"].(string)
+	if googleAccountID == "" || email == "" {
+		return nil, ErrInvalidGoogleToken
+	}
+	avatarURL, _ := payload.Claims["picture"].(string)
+
+	user, err := authService.users.FindByGoogleID(ctx, googleAccountID)
+	if err == nil {
+		return authService.issueTokens(ctx, authService.syncAvatar(ctx, user, avatarURL))
+	}
+	if !errors.Is(err, repository.ErrUserNotFound) {
+		return nil, err
+	}
+
+	// First Google sign-in: link to the existing account with the same
+	// email, or create a fresh account.
+	user, err = authService.users.FindByEmail(ctx, email)
+	if err == nil {
+		if err := authService.users.SetGoogleID(ctx, user.ID, googleAccountID); err != nil {
+			return nil, err
+		}
+		return authService.issueTokens(ctx, authService.syncAvatar(ctx, user, avatarURL))
+	}
+	if !errors.Is(err, repository.ErrUserNotFound) {
+		return nil, err
+	}
+
+	displayName, _ := payload.Claims["name"].(string)
+	user, err = authService.createGoogleUser(ctx, email, displayName, googleAccountID, avatarURL)
+	if err != nil {
+		return nil, err
+	}
+	return authService.issueTokens(ctx, user)
+}
+
+// syncAvatar keeps the stored avatar in step with the Google profile
+// picture. Failures are non-fatal: sign-in proceeds with the old avatar.
+func (authService *AuthService) syncAvatar(ctx context.Context, user *repository.User, avatarURL string) *repository.User {
+	if avatarURL == "" || avatarURL == user.AvatarURL {
+		return user
+	}
+	if err := authService.users.UpdateAvatarURL(ctx, user.ID, avatarURL); err != nil {
+		return user
+	}
+	user.AvatarURL = avatarURL
+	return user
+}
+
+func (authService *AuthService) createGoogleUser(ctx context.Context, email, displayName, googleAccountID, avatarURL string) (*repository.User, error) {
+	baseUsername := usernameFromGoogleProfile(email, displayName)
+	candidate := baseUsername
+	for attempt := 0; attempt < 6; attempt++ {
+		user, err := authService.users.CreateWithGoogle(ctx, candidate, email, googleAccountID, avatarURL)
+		if err == nil {
+			return user, nil
+		}
+		if !errors.Is(err, repository.ErrUsernameTaken) {
+			return nil, err
+		}
+		suffixBytes := make([]byte, 2)
+		if _, err := rand.Read(suffixBytes); err != nil {
+			return nil, fmt.Errorf("generate username suffix: %w", err)
+		}
+		suffix := hex.EncodeToString(suffixBytes)
+		candidate = trimToLength(baseUsername, maxUsernameLength-len(suffix)) + suffix
+	}
+	return nil, fmt.Errorf("could not find a free username for %s", email)
+}
+
+// usernameFromGoogleProfile builds a valid username from the Google
+// display name (preferred) or the email prefix.
+func usernameFromGoogleProfile(email, displayName string) string {
+	source := displayName
+	if source == "" {
+		source, _, _ = strings.Cut(email, "@")
+	}
+	var builder strings.Builder
+	for _, character := range strings.ToLower(source) {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= '0' && character <= '9',
+			character == '_':
+			builder.WriteRune(character)
+		case character == ' ' || character == '.' || character == '-':
+			builder.WriteRune('_')
+		}
+	}
+	username := builder.String()
+	if len(username) < minUsernameLength {
+		username += "_reader"
+	}
+	return trimToLength(username, maxUsernameLength)
+}
+
+func trimToLength(value string, maxLength int) string {
+	if len(value) > maxLength {
+		return value[:maxLength]
+	}
+	return value
 }
 
 // Refresh rotates the refresh token: the presented token is revoked and

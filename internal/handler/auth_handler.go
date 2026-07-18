@@ -34,10 +34,15 @@ type refreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+type googleLoginRequest struct {
+	IDToken string `json:"id_token"`
+}
+
 type userResponse struct {
 	ID        string    `json:"id"`
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
+	AvatarURL string    `json:"avatar_url"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -54,6 +59,7 @@ func newAuthResponse(result *service.AuthResult) authResponse {
 			ID:        result.User.ID,
 			Username:  result.User.Username,
 			Email:     result.User.Email,
+			AvatarURL: result.User.AvatarURL,
 			CreatedAt: result.User.CreatedAt,
 		},
 		AccessToken:  result.AccessToken,
@@ -87,6 +93,25 @@ func (authHandler *AuthHandler) Login(responseWriter http.ResponseWriter, reques
 
 	result, err := authHandler.authService.Login(
 		request.Context(), requestBody.Email, requestBody.Password)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newAuthResponse(result))
+}
+
+// GoogleLogin signs in with a Google ID token obtained on the device.
+func (authHandler *AuthHandler) GoogleLogin(responseWriter http.ResponseWriter, request *http.Request) {
+	var requestBody googleLoginRequest
+	if !decodeJSON(responseWriter, request, &requestBody) {
+		return
+	}
+	if requestBody.IDToken == "" {
+		writeError(responseWriter, http.StatusBadRequest, "id_token is required")
+		return
+	}
+
+	result, err := authHandler.authService.LoginWithGoogle(request.Context(), requestBody.IDToken)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
@@ -148,8 +173,11 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 		errors.Is(err, repository.ErrUsernameTaken):
 		writeError(responseWriter, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials),
-		errors.Is(err, service.ErrInvalidRefreshToken):
+		errors.Is(err, service.ErrInvalidRefreshToken),
+		errors.Is(err, service.ErrInvalidGoogleToken):
 		writeError(responseWriter, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, service.ErrGoogleLoginNotConfigured):
+		writeError(responseWriter, http.StatusServiceUnavailable, err.Error())
 	default:
 		log.Printf("internal error: %v", err)
 		writeError(responseWriter, http.StatusInternalServerError, "internal server error")

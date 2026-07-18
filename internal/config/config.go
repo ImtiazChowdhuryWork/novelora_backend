@@ -17,6 +17,11 @@ type Config struct {
 	JWTSecret       []byte
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
+	// OAuth Web client ID used as the audience of Google ID tokens.
+	// Empty disables Google sign-in (endpoint answers 503).
+	GoogleClientID string
+	// Root directory for uploaded files (avatars live in a subfolder).
+	UploadsDirectory string
 }
 
 // Load reads configuration from the environment.
@@ -24,10 +29,12 @@ func Load() (*Config, error) {
 	loadDotEnv(".env")
 
 	configuration := &Config{
-		Port:            envOrDefault("PORT", "8080"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		AccessTokenTTL:  15 * time.Minute,
-		RefreshTokenTTL: 30 * 24 * time.Hour,
+		Port:             envOrDefault("PORT", "8080"),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		AccessTokenTTL:   15 * time.Minute,
+		RefreshTokenTTL:  30 * 24 * time.Hour,
+		GoogleClientID:   os.Getenv("GOOGLE_CLIENT_ID"),
+		UploadsDirectory: envOrDefault("UPLOADS_DIR", "uploads"),
 	}
 
 	if configuration.DatabaseURL == "" {
