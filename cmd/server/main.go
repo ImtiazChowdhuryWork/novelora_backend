@@ -11,6 +11,7 @@ import (
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/database"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/handler"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
@@ -36,9 +37,14 @@ func main() {
 
 	userRepository := repository.NewUserRepository(pool)
 	refreshTokenRepository := repository.NewRefreshTokenRepository(pool)
+
+	eventHub := realtime.NewHub()
+	go eventHub.Run()
+
 	authService := service.NewAuthService(
 		userRepository,
 		refreshTokenRepository,
+		eventHub,
 		configuration.JWTSecret,
 		configuration.AccessTokenTTL,
 		configuration.RefreshTokenTTL,
@@ -71,6 +77,9 @@ func main() {
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
 		http.FileServer(http.Dir(configuration.UploadsDirectory))))
+
+	// Realtime events (JWT via ?token= — browsers can't set WS headers)
+	mux.Handle("GET /ws", realtime.NewWSHandler(eventHub, configuration.JWTSecret))
 
 	server := &http.Server{
 		Addr:    ":" + configuration.Port,

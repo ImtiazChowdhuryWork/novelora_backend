@@ -56,6 +56,7 @@ If the local Postgres Windows service can't start without admin rights, run it d
 | POST   | `/api/v1/auth/refresh`  | ✅     | `{refresh_token}` → 200, rotates the token   |
 | POST   | `/api/v1/auth/logout`   | ✅     | `{refresh_token}` → 204, revokes the token   |
 | GET    | `/api/v1/users/me`      | ✅     | Bearer JWT → 200 current user (401 otherwise)|
+| GET    | `/ws`                   | ✅     | Realtime events; JWT via `?token=` (WS upgrade)|
 
 Success responses: `{user: {id, username, email, created_at}, access_token, refresh_token, expires_in}`.
 Errors: `{"error": "message"}` with 400 (validation/bad JSON), 401 (bad credentials / bad refresh token), 409 (email/username taken).

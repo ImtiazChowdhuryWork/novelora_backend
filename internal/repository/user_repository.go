@@ -24,6 +24,7 @@ type User struct {
 	Email        string
 	PasswordHash string
 	AvatarURL    string // empty when the user has no avatar
+	Role         string // "reader" or "admin"
 	CreatedAt    time.Time
 }
 
@@ -35,7 +36,7 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 	return &UserRepository{pool: pool}
 }
 
-const userColumns = `id, username, email, password_hash, coalesce(avatar_url, ''), created_at`
+const userColumns = `id, username, email, password_hash, coalesce(avatar_url, ''), role, created_at`
 
 // Create inserts a new user and returns the stored row. Duplicate
 // username/email surface as ErrUsernameTaken / ErrEmailTaken.
@@ -46,7 +47,7 @@ func (repository *UserRepository) Create(ctx context.Context, username, email, p
 		 VALUES ($1, $2, $3)
 		 RETURNING `+userColumns,
 		username, email, passwordHash,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.Role, &user.CreatedAt)
 	if err != nil {
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) && postgresError.Code == pgerrcodeUniqueViolation {
@@ -67,7 +68,7 @@ func (repository *UserRepository) FindByEmail(ctx context.Context, email string)
 	err := repository.pool.QueryRow(ctx,
 		`SELECT `+userColumns+` FROM users WHERE lower(email) = lower($1)`,
 		email,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.Role, &user.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -85,7 +86,7 @@ func (repository *UserRepository) CreateWithGoogle(ctx context.Context, username
 		 VALUES ($1, $2, '', $3, nullif($4, ''))
 		 RETURNING `+userColumns,
 		username, email, googleID, avatarURL,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.Role, &user.CreatedAt)
 	if err != nil {
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) && postgresError.Code == pgerrcodeUniqueViolation {
@@ -106,7 +107,7 @@ func (repository *UserRepository) FindByGoogleID(ctx context.Context, googleID s
 	err := repository.pool.QueryRow(ctx,
 		`SELECT `+userColumns+` FROM users WHERE google_id = $1`,
 		googleID,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.Role, &user.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -145,7 +146,7 @@ func (repository *UserRepository) FindByID(ctx context.Context, userID string) (
 	err := repository.pool.QueryRow(ctx,
 		`SELECT `+userColumns+` FROM users WHERE id = $1`,
 		userID,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.Role, &user.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}

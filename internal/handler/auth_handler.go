@@ -43,6 +43,7 @@ type userResponse struct {
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
 	AvatarURL string    `json:"avatar_url"`
+	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -60,6 +61,7 @@ func newAuthResponse(result *service.AuthResult) authResponse {
 			Username:  result.User.Username,
 			Email:     result.User.Email,
 			AvatarURL: result.User.AvatarURL,
+			Role:      result.User.Role,
 			CreatedAt: result.User.CreatedAt,
 		},
 		AccessToken:  result.AccessToken,

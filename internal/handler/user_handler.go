@@ -156,6 +156,7 @@ func (userHandler *UserHandler) respondWithUser(responseWriter http.ResponseWrit
 		"username":   user.Username,
 		"email":      user.Email,
 		"avatar_url": user.AvatarURL,
+		"role":       user.Role,
 		"created_at": user.CreatedAt,
 	})
 }
