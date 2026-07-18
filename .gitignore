@@ -19,3 +19,6 @@ coverage.html
 # IDE
 .idea/
 .vscode/
+
+# Uploaded files
+/uploads/

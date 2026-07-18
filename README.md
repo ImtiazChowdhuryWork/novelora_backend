@@ -52,8 +52,10 @@ If the local Postgres Windows service can't start without admin rights, run it d
 | GET    | `/health`               | ✅     | Liveness check                               |
 | POST   | `/api/v1/auth/register` | ✅     | `{username, email, password}` → 201 + tokens |
 | POST   | `/api/v1/auth/login`    | ✅     | `{email, password}` → 200 + tokens           |
+| POST   | `/api/v1/auth/google`   | ✅     | `{id_token}` → 200 + tokens (503 if GOOGLE_CLIENT_ID unset) |
 | POST   | `/api/v1/auth/refresh`  | ✅     | `{refresh_token}` → 200, rotates the token   |
 | POST   | `/api/v1/auth/logout`   | ✅     | `{refresh_token}` → 204, revokes the token   |
+| GET    | `/api/v1/users/me`      | ✅     | Bearer JWT → 200 current user (401 otherwise)|
 
 Success responses: `{user: {id, username, email, created_at}, access_token, refresh_token, expires_in}`.
 Errors: `{"error": "message"}` with 400 (validation/bad JSON), 401 (bad credentials / bad refresh token), 409 (email/username taken).

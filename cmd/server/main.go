@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/config"
@@ -41,8 +42,11 @@ func main() {
 		configuration.JWTSecret,
 		configuration.AccessTokenTTL,
 		configuration.RefreshTokenTTL,
+		configuration.GoogleClientID,
 	)
 	authHandler := handler.NewAuthHandler(authService)
+	userHandler := handler.NewUserHandler(
+		userRepository, filepath.Join(configuration.UploadsDirectory, "avatars"))
 
 	mux := http.NewServeMux()
 
@@ -52,8 +56,21 @@ func main() {
 	// Auth (matches the Flutter app's ApiEndpoints)
 	mux.HandleFunc("POST /api/v1/auth/register", authHandler.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)
+	mux.HandleFunc("POST /api/v1/auth/google", authHandler.GoogleLogin)
 	mux.HandleFunc("POST /api/v1/auth/refresh", authHandler.RefreshToken)
 	mux.HandleFunc("POST /api/v1/auth/logout", authHandler.Logout)
+
+	// Users (require a valid access token)
+	mux.Handle("GET /api/v1/users/me", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(userHandler.CurrentUser)))
+	mux.Handle("PUT /api/v1/users/me/avatar", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(userHandler.UpdateAvatar)))
+	mux.Handle("DELETE /api/v1/users/me/avatar", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(userHandler.RemoveAvatar)))
+
+	// Uploaded files (avatars)
+	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
+		http.FileServer(http.Dir(configuration.UploadsDirectory))))
 
 	server := &http.Server{
 		Addr:    ":" + configuration.Port,
