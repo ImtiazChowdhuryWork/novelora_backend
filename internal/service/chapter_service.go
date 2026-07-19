@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/push"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 )
@@ -17,17 +20,27 @@ const (
 )
 
 type ChapterService struct {
-	chapters *repository.ChapterRepository
-	novels   *repository.NovelRepository
-	events   realtime.Publisher
+	chapters     *repository.ChapterRepository
+	novels       *repository.NovelRepository
+	deviceTokens *repository.DeviceTokenRepository
+	notifier     push.Notifier
+	events       realtime.Publisher
 }
 
 func NewChapterService(
 	chapters *repository.ChapterRepository,
 	novels *repository.NovelRepository,
+	deviceTokens *repository.DeviceTokenRepository,
+	notifier push.Notifier,
 	events realtime.Publisher,
 ) *ChapterService {
-	return &ChapterService{chapters: chapters, novels: novels, events: events}
+	return &ChapterService{
+		chapters:     chapters,
+		novels:       novels,
+		deviceTokens: deviceTokens,
+		notifier:     notifier,
+		events:       events,
+	}
 }
 
 func (chapterService *ChapterService) ListByNovel(ctx context.Context, novelID string) ([]*repository.Chapter, error) {
@@ -137,9 +150,31 @@ func (chapterService *ChapterService) UpdateStatus(ctx context.Context, chapterI
 	chapterTopic := "chapter.updated"
 	if status == "published" {
 		chapterTopic = "chapter.published"
+		go chapterService.notifyNewChapterPublished(chapter)
 	}
 	chapterService.publishChapterChangedEvents(chapter.NovelID, chapterTopic)
 	return chapter, nil
+}
+
+// notifyNewChapterPublished runs on its own timeout-bounded context —
+// never the request's — so a slow or failing push provider can't delay
+// or fail the publish response. Runs after UpdateStatus already
+// committed, so the notification always reflects a real state change.
+func (chapterService *ChapterService) notifyNewChapterPublished(chapter *repository.Chapter) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	novel, err := chapterService.novels.GetByID(ctx, chapter.NovelID)
+	if err != nil {
+		log.Printf("push: could not load novel %s for notification: %v", chapter.NovelID, err)
+		return
+	}
+	tokens, err := chapterService.deviceTokens.ListAllTokens(ctx)
+	if err != nil {
+		log.Printf("push: could not load device tokens: %v", err)
+		return
+	}
+	chapterService.notifier.NotifyNewChapter(ctx, tokens, novel.Title, chapter.Title, chapter.Number)
 }
 
 func (chapterService *ChapterService) Delete(ctx context.Context, chapterID string) error {

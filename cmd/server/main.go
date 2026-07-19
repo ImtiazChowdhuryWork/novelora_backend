@@ -11,6 +11,7 @@ import (
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/database"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/handler"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/push"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
@@ -53,11 +54,28 @@ func main() {
 	novelRepository := repository.NewNovelRepository(pool)
 	novelService := service.NewNovelService(novelRepository, eventHub)
 	chapterRepository := repository.NewChapterRepository(pool)
-	chapterService := service.NewChapterService(chapterRepository, novelRepository, eventHub)
+	deviceTokenRepository := repository.NewDeviceTokenRepository(pool)
+
+	var chapterNotifier push.Notifier = push.NoopNotifier{}
+	if configuration.FirebaseCredentialsPath != "" {
+		fcmNotifier, err := push.NewFCMNotifier(startupContext, configuration.FirebaseCredentialsPath)
+		if err != nil {
+			log.Printf("push: failed to initialize FCM, notifications disabled: %v", err)
+		} else {
+			chapterNotifier = fcmNotifier
+			log.Println("push: FCM notifications enabled")
+		}
+	} else {
+		log.Println("push: FIREBASE_CREDENTIALS_JSON not set, notifications disabled")
+	}
+
+	chapterService := service.NewChapterService(
+		chapterRepository, novelRepository, deviceTokenRepository, chapterNotifier, eventHub)
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
-		userRepository, filepath.Join(configuration.UploadsDirectory, "avatars"))
+		userRepository, deviceTokenRepository,
+		filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
@@ -79,6 +97,8 @@ func main() {
 		configuration.JWTSecret, http.HandlerFunc(userHandler.CurrentUser)))
 	mux.Handle("PUT /api/v1/users/me/avatar", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.UpdateAvatar)))
+	mux.Handle("PUT /api/v1/users/me/device-token", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(userHandler.RegisterDeviceToken)))
 	mux.Handle("DELETE /api/v1/users/me/avatar", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.RemoveAvatar)))
 

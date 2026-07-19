@@ -11,16 +11,52 @@ import (
 
 type UserHandler struct {
 	users            *repository.UserRepository
+	deviceTokens     *repository.DeviceTokenRepository
 	avatarsDirectory string
 	avatarsUrlPrefix string
 }
 
-func NewUserHandler(users *repository.UserRepository, avatarsDirectory string) *UserHandler {
+func NewUserHandler(
+	users *repository.UserRepository,
+	deviceTokens *repository.DeviceTokenRepository,
+	avatarsDirectory string,
+) *UserHandler {
 	return &UserHandler{
 		users:            users,
+		deviceTokens:     deviceTokens,
 		avatarsDirectory: avatarsDirectory,
 		avatarsUrlPrefix: "/uploads/avatars/",
 	}
+}
+
+type deviceTokenRequest struct {
+	Token    string `json:"token"`
+	Platform string `json:"platform"`
+}
+
+// RegisterDeviceToken upserts the caller's FCM device token so chapter
+// publishes can push to it. Requires the Authenticate middleware.
+func (userHandler *UserHandler) RegisterDeviceToken(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+
+	var tokenRequest deviceTokenRequest
+	if !decodeJSON(responseWriter, request, &tokenRequest) {
+		return
+	}
+	if tokenRequest.Token == "" {
+		writeError(responseWriter, http.StatusBadRequest, "token is required")
+		return
+	}
+	platform := tokenRequest.Platform
+	if platform != "android" && platform != "ios" {
+		platform = "android"
+	}
+
+	if err := userHandler.deviceTokens.Upsert(request.Context(), userID, tokenRequest.Token, platform); err != nil {
+		userHandler.internalError(responseWriter, err)
+		return
+	}
+	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
 // CurrentUser returns the account of the authenticated caller.

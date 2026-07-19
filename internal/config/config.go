@@ -22,6 +22,11 @@ type Config struct {
 	GoogleClientID string
 	// Root directory for uploaded files (avatars live in a subfolder).
 	UploadsDirectory string
+	// Path to a Firebase service account JSON key (Firebase Console →
+	// Project Settings → Service Accounts → Generate new private key).
+	// Empty disables push notifications (chapters still publish; the
+	// notification step is skipped and logged).
+	FirebaseCredentialsPath string
 }
 
 // Load reads configuration from the environment.
@@ -29,12 +34,13 @@ func Load() (*Config, error) {
 	loadDotEnv(".env")
 
 	configuration := &Config{
-		Port:             envOrDefault("PORT", "8080"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		AccessTokenTTL:   15 * time.Minute,
-		RefreshTokenTTL:  30 * 24 * time.Hour,
-		GoogleClientID:   os.Getenv("GOOGLE_CLIENT_ID"),
-		UploadsDirectory: envOrDefault("UPLOADS_DIR", "uploads"),
+		Port:                    envOrDefault("PORT", "8080"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		AccessTokenTTL:          15 * time.Minute,
+		RefreshTokenTTL:         30 * 24 * time.Hour,
+		GoogleClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
+		UploadsDirectory:        envOrDefault("UPLOADS_DIR", "uploads"),
+		FirebaseCredentialsPath: os.Getenv("FIREBASE_CREDENTIALS_JSON"),
 	}
 
 	if configuration.DatabaseURL == "" {
