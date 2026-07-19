@@ -52,11 +52,14 @@ func main() {
 	)
 	novelRepository := repository.NewNovelRepository(pool)
 	novelService := service.NewNovelService(novelRepository, eventHub)
+	chapterRepository := repository.NewChapterRepository(pool)
+	chapterService := service.NewChapterService(chapterRepository, novelRepository, eventHub)
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
 		userRepository, filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
+	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
 
 	mux := http.NewServeMux()
 
@@ -93,6 +96,15 @@ func main() {
 	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))
 	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
+
+	// Admin: chapters
+	mux.Handle("GET /api/v1/admin/novels/{id}/chapters", requireAdmin(adminChapterHandler.ListByNovel))
+	mux.Handle("POST /api/v1/admin/novels/{id}/chapters", requireAdmin(adminChapterHandler.Create))
+	mux.Handle("POST /api/v1/admin/novels/{id}/chapters/import", requireAdmin(adminChapterHandler.Import))
+	mux.Handle("GET /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Get))
+	mux.Handle("PUT /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Update))
+	mux.Handle("PUT /api/v1/admin/chapters/{id}/status", requireAdmin(adminChapterHandler.UpdateStatus))
+	mux.Handle("DELETE /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Delete))
 
 	// Realtime events (JWT via ?token= — browsers can't set WS headers)
 	mux.Handle("GET /ws", realtime.NewWSHandler(eventHub, configuration.JWTSecret))
