@@ -7,5 +7,7 @@ import "context"
 // a push provider is down — implementations log failures internally.
 // Mirrors realtime.Publisher's interface-first, swappable-transport shape.
 type Notifier interface {
-	NotifyNewChapter(ctx context.Context, tokens []string, novelTitle, chapterTitle string, chapterNumber int)
+	// novelID rides along as data (not shown in the notification itself)
+	// so a tap on the client can navigate straight to that novel.
+	NotifyNewChapter(ctx context.Context, tokens []string, novelID, novelTitle, chapterTitle string, chapterNumber int)
 }

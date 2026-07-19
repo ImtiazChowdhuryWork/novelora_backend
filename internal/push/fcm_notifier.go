@@ -33,7 +33,7 @@ func NewFCMNotifier(ctx context.Context, credentialsPath string) (*FCMNotifier, 
 	return &FCMNotifier{client: client}, nil
 }
 
-func (notifier *FCMNotifier) NotifyNewChapter(ctx context.Context, tokens []string, novelTitle, chapterTitle string, chapterNumber int) {
+func (notifier *FCMNotifier) NotifyNewChapter(ctx context.Context, tokens []string, novelID, novelTitle, chapterTitle string, chapterNumber int) {
 	if len(tokens) == 0 {
 		return
 	}
@@ -52,6 +52,9 @@ func (notifier *FCMNotifier) NotifyNewChapter(ctx context.Context, tokens []stri
 			Notification: &messaging.Notification{
 				Title: novelTitle,
 				Body:  body,
+			},
+			Data: map[string]string{
+				"novel_id": novelID,
 			},
 		})
 		if err != nil {

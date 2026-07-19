@@ -174,7 +174,7 @@ func (chapterService *ChapterService) notifyNewChapterPublished(chapter *reposit
 		log.Printf("push: could not load device tokens: %v", err)
 		return
 	}
-	chapterService.notifier.NotifyNewChapter(ctx, tokens, novel.Title, chapter.Title, chapter.Number)
+	chapterService.notifier.NotifyNewChapter(ctx, tokens, novel.ID, novel.Title, chapter.Title, chapter.Number)
 }
 
 func (chapterService *ChapterService) Delete(ctx context.Context, chapterID string) error {
