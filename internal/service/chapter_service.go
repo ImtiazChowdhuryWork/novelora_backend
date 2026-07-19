@@ -20,26 +20,29 @@ const (
 )
 
 type ChapterService struct {
-	chapters     *repository.ChapterRepository
-	novels       *repository.NovelRepository
-	deviceTokens *repository.DeviceTokenRepository
-	notifier     push.Notifier
-	events       realtime.Publisher
+	chapters      *repository.ChapterRepository
+	novels        *repository.NovelRepository
+	deviceTokens  *repository.DeviceTokenRepository
+	notifications *repository.NotificationRepository
+	notifier      push.Notifier
+	events        realtime.Publisher
 }
 
 func NewChapterService(
 	chapters *repository.ChapterRepository,
 	novels *repository.NovelRepository,
 	deviceTokens *repository.DeviceTokenRepository,
+	notifications *repository.NotificationRepository,
 	notifier push.Notifier,
 	events realtime.Publisher,
 ) *ChapterService {
 	return &ChapterService{
-		chapters:     chapters,
-		novels:       novels,
-		deviceTokens: deviceTokens,
-		notifier:     notifier,
-		events:       events,
+		chapters:      chapters,
+		novels:        novels,
+		deviceTokens:  deviceTokens,
+		notifications: notifications,
+		notifier:      notifier,
+		events:        events,
 	}
 }
 
@@ -160,6 +163,9 @@ func (chapterService *ChapterService) UpdateStatus(ctx context.Context, chapterI
 // never the request's — so a slow or failing push provider can't delay
 // or fail the publish response. Runs after UpdateStatus already
 // committed, so the notification always reflects a real state change.
+// Populates both delivery paths: the FCM push (device tray) and the
+// in-app inbox (notifications table) — independently, so a failure in
+// one doesn't skip the other.
 func (chapterService *ChapterService) notifyNewChapterPublished(chapter *repository.Chapter) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -169,12 +175,23 @@ func (chapterService *ChapterService) notifyNewChapterPublished(chapter *reposit
 		log.Printf("push: could not load novel %s for notification: %v", chapter.NovelID, err)
 		return
 	}
+
 	tokens, err := chapterService.deviceTokens.ListAllTokens(ctx)
 	if err != nil {
 		log.Printf("push: could not load device tokens: %v", err)
+	} else {
+		chapterService.notifier.NotifyNewChapter(ctx, tokens, novel.ID, novel.Title, chapter.Title, chapter.Number)
+	}
+
+	body := fmt.Sprintf("Chapter %d is now available", chapter.Number)
+	if chapter.Title != "" {
+		body += ": " + chapter.Title
+	}
+	if err := chapterService.notifications.CreateForAllUsers(ctx, novel.ID, chapter.ID, novel.Title, body); err != nil {
+		log.Printf("inbox: could not create notifications for chapter %s: %v", chapter.ID, err)
 		return
 	}
-	chapterService.notifier.NotifyNewChapter(ctx, tokens, novel.ID, novel.Title, chapter.Title, chapter.Number)
+	chapterService.events.Publish(realtime.Event{Topic: "notification.new"})
 }
 
 func (chapterService *ChapterService) Delete(ctx context.Context, chapterID string) error {

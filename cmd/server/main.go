@@ -55,6 +55,7 @@ func main() {
 	novelService := service.NewNovelService(novelRepository, eventHub)
 	chapterRepository := repository.NewChapterRepository(pool)
 	deviceTokenRepository := repository.NewDeviceTokenRepository(pool)
+	notificationRepository := repository.NewNotificationRepository(pool)
 
 	var chapterNotifier push.Notifier = push.NoopNotifier{}
 	if configuration.FirebaseCredentialsPath != "" {
@@ -70,7 +71,7 @@ func main() {
 	}
 
 	chapterService := service.NewChapterService(
-		chapterRepository, novelRepository, deviceTokenRepository, chapterNotifier, eventHub)
+		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
@@ -79,6 +80,7 @@ func main() {
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
+	notificationHandler := handler.NewNotificationHandler(notificationRepository)
 
 	mux := http.NewServeMux()
 
@@ -101,6 +103,16 @@ func main() {
 		configuration.JWTSecret, http.HandlerFunc(userHandler.RemoveAvatar)))
 	// Deliberately public: see RegisterDeviceToken's doc comment
 	mux.HandleFunc("PUT /api/v1/users/me/device-token", userHandler.RegisterDeviceToken)
+
+	// In-app notification inbox
+	mux.Handle("GET /api/v1/users/me/notifications", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(notificationHandler.List)))
+	mux.Handle("GET /api/v1/users/me/notifications/unread-count", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(notificationHandler.UnreadCount)))
+	mux.Handle("PUT /api/v1/users/me/notifications/read-all", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(notificationHandler.MarkAllRead)))
+	mux.Handle("PUT /api/v1/users/me/notifications/{id}/read", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(notificationHandler.MarkRead)))
 
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
