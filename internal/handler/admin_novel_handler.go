@@ -187,25 +187,35 @@ func (adminNovelHandler *AdminNovelHandler) Delete(responseWriter http.ResponseW
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
-type novelReorderRequest struct {
-	NovelIDs []string `json:"novel_ids"`
+type novelPositionRequest struct {
+	ID        string `json:"id"`
+	SortOrder int    `json:"sort_order"`
 }
 
-// Reorder: PUT /admin/novels/reorder — sets the manual display order
-// to exactly the given id list (index 0 = first). Meant for the whole
-// unfiltered catalog; see NovelService.Reorder.
+type novelReorderRequest struct {
+	Items []novelPositionRequest `json:"items"`
+}
+
+// Reorder: PUT /admin/novels/reorder — sets each given novel's
+// sort_order exactly as provided. The dashboard sends absolute
+// positions (page offset + local index) so dragging within one page
+// never collides with untouched novels on other pages.
 func (adminNovelHandler *AdminNovelHandler) Reorder(responseWriter http.ResponseWriter, request *http.Request) {
 	var reorderRequest novelReorderRequest
 	if !decodeJSON(responseWriter, request, &reorderRequest) {
 		return
 	}
-	if err := adminNovelHandler.novelService.Reorder(request.Context(), reorderRequest.NovelIDs); err != nil {
+	positions := make([]repository.NovelPosition, 0, len(reorderRequest.Items))
+	for _, item := range reorderRequest.Items {
+		positions = append(positions, repository.NovelPosition{NovelID: item.ID, SortOrder: item.SortOrder})
+	}
+	if err := adminNovelHandler.novelService.Reorder(request.Context(), positions); err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
 	actorID, actorName := actorFromContext(request.Context())
 	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.reordered", "novel", "",
-		map[string]any{"count": len(reorderRequest.NovelIDs)})
+		map[string]any{"count": len(positions)})
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 

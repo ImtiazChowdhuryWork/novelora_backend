@@ -123,15 +123,14 @@ func (novelService *NovelService) UpdateCover(ctx context.Context, novelID, cove
 	return nil
 }
 
-// Reorder sets the manual display order to exactly novelIDs, in the
-// order given (index 0 = first). Meant for the whole unfiltered
-// catalog — reordering a filtered subset would silently interleave it
-// with whatever wasn't included.
-func (novelService *NovelService) Reorder(ctx context.Context, novelIDs []string) error {
-	if len(novelIDs) == 0 {
-		return &ValidationError{Message: "novel_ids is required"}
+// Reorder sets each given novel's sort_order exactly as provided —
+// see NovelRepository.Reorder for why positions are absolute rather
+// than array indices.
+func (novelService *NovelService) Reorder(ctx context.Context, positions []repository.NovelPosition) error {
+	if len(positions) == 0 {
+		return &ValidationError{Message: "positions is required"}
 	}
-	if err := novelService.novels.Reorder(ctx, novelIDs); err != nil {
+	if err := novelService.novels.Reorder(ctx, positions); err != nil {
 		return err
 	}
 	novelService.events.Publish(realtime.Event{Topic: "novel.updated"})

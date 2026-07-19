@@ -166,23 +166,32 @@ func (repository *NovelRepository) Create(ctx context.Context, write NovelWrite)
 	return novel, nil
 }
 
-// Reorder assigns sort_order = index for each id in novelIDs, in the
-// order given. IDs not owned by any novel are silently skipped (no
-// error) — the caller sent a stale id, not a serious enough problem
-// to fail the whole reorder.
-func (repository *NovelRepository) Reorder(ctx context.Context, novelIDs []string) error {
+// NovelPosition is one novel's new place in the manual display order.
+type NovelPosition struct {
+	NovelID   string
+	SortOrder int
+}
+
+// Reorder sets sort_order = SortOrder for each given novel, exactly as
+// provided — the caller (not this method) decides what those values
+// mean. This matters because the dashboard's drag-to-reorder only ever
+// has one page of novels loaded at a time: it computes each dragged
+// novel's absolute sort_order (page offset + local position) rather
+// than relying on array index, so reordering within page 2 can't
+// collide with page 1's untouched sort_order values.
+func (repository *NovelRepository) Reorder(ctx context.Context, positions []NovelPosition) error {
 	transaction, err := repository.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin reorder: %w", err)
 	}
 	defer transaction.Rollback(ctx)
 
-	for index, novelID := range novelIDs {
+	for _, position := range positions {
 		if _, err := transaction.Exec(ctx,
 			"UPDATE novels SET sort_order = $1 WHERE id = $2 AND deleted_at IS NULL",
-			index, novelID,
+			position.SortOrder, position.NovelID,
 		); err != nil {
-			return fmt.Errorf("reorder novel %s: %w", novelID, err)
+			return fmt.Errorf("reorder novel %s: %w", position.NovelID, err)
 		}
 	}
 	if err := transaction.Commit(ctx); err != nil {
