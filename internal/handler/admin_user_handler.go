@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 )
@@ -14,11 +15,12 @@ import (
 // (comments/reviews) yet, so banning is the only moderation action —
 // this is the natural place to add a content queue once one exists.
 type AdminUserHandler struct {
-	users *repository.UserRepository
+	users       *repository.UserRepository
+	auditLogger *audit.Logger
 }
 
-func NewAdminUserHandler(users *repository.UserRepository) *AdminUserHandler {
-	return &AdminUserHandler{users: users}
+func NewAdminUserHandler(users *repository.UserRepository, auditLogger *audit.Logger) *AdminUserHandler {
+	return &AdminUserHandler{users: users, auditLogger: auditLogger}
 }
 
 type adminUserResponse struct {
@@ -100,6 +102,9 @@ func (adminUserHandler *AdminUserHandler) UpdateRole(responseWriter http.Respons
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminUserHandler.auditLogger.Log(actorID, actorName, "user.role_changed", "user", targetUserID,
+		map[string]any{"role": updateRequest.Role})
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
@@ -124,6 +129,12 @@ func (adminUserHandler *AdminUserHandler) UpdateBanned(responseWriter http.Respo
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	action := "user.unbanned"
+	if updateRequest.Banned {
+		action = "user.banned"
+	}
+	adminUserHandler.auditLogger.Log(actorID, actorName, action, "user", targetUserID, nil)
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 

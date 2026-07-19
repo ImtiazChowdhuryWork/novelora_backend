@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 )
 
@@ -13,11 +14,12 @@ import (
 // harmless, side-effect-free read either way. Create/Delete are
 // admin-only.
 type GenreHandler struct {
-	genres *repository.GenreRepository
+	genres      *repository.GenreRepository
+	auditLogger *audit.Logger
 }
 
-func NewGenreHandler(genres *repository.GenreRepository) *GenreHandler {
-	return &GenreHandler{genres: genres}
+func NewGenreHandler(genres *repository.GenreRepository, auditLogger *audit.Logger) *GenreHandler {
+	return &GenreHandler{genres: genres, auditLogger: auditLogger}
 }
 
 func newGenreItemResponse(genre *repository.Genre) genreResponse {
@@ -59,14 +61,20 @@ func (genreHandler *GenreHandler) Create(responseWriter http.ResponseWriter, req
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	genreHandler.auditLogger.Log(actorID, actorName, "genre.created", "genre", genre.ID,
+		map[string]any{"name": genre.Name})
 	writeJSON(responseWriter, http.StatusCreated, newGenreItemResponse(genre))
 }
 
 // Delete: DELETE /admin/genres/{id}
 func (genreHandler *GenreHandler) Delete(responseWriter http.ResponseWriter, request *http.Request) {
-	if err := genreHandler.genres.Delete(request.Context(), request.PathValue("id")); err != nil {
+	genreID := request.PathValue("id")
+	if err := genreHandler.genres.Delete(request.Context(), genreID); err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	genreHandler.auditLogger.Log(actorID, actorName, "genre.deleted", "genre", genreID, nil)
 	responseWriter.WriteHeader(http.StatusNoContent)
 }

@@ -6,19 +6,22 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
 
 type AdminNovelHandler struct {
 	novelService    *service.NovelService
+	auditLogger     *audit.Logger
 	coversDirectory string
 	coversUrlPrefix string
 }
 
-func NewAdminNovelHandler(novelService *service.NovelService, uploadsDirectory string) *AdminNovelHandler {
+func NewAdminNovelHandler(novelService *service.NovelService, auditLogger *audit.Logger, uploadsDirectory string) *AdminNovelHandler {
 	return &AdminNovelHandler{
 		novelService:    novelService,
+		auditLogger:     auditLogger,
 		coversDirectory: filepath.Join(uploadsDirectory, "covers"),
 		coversUrlPrefix: "/uploads/covers/",
 	}
@@ -142,6 +145,9 @@ func (adminNovelHandler *AdminNovelHandler) Create(responseWriter http.ResponseW
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.created", "novel", novel.ID,
+		map[string]any{"title": novel.Title})
 	writeJSON(responseWriter, http.StatusCreated, newNovelResponse(novel))
 }
 
@@ -156,14 +162,26 @@ func (adminNovelHandler *AdminNovelHandler) Update(responseWriter http.ResponseW
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.updated", "novel", novel.ID,
+		map[string]any{"title": novel.Title})
 	writeJSON(responseWriter, http.StatusOK, newNovelResponse(novel))
 }
 
 func (adminNovelHandler *AdminNovelHandler) Delete(responseWriter http.ResponseWriter, request *http.Request) {
-	if err := adminNovelHandler.novelService.Delete(request.Context(), request.PathValue("id")); err != nil {
+	novelID := request.PathValue("id")
+	novel, err := adminNovelHandler.novelService.Get(request.Context(), novelID)
+	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
+	if err := adminNovelHandler.novelService.Delete(request.Context(), novelID); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.deleted", "novel", novelID,
+		map[string]any{"title": novel.Title})
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 

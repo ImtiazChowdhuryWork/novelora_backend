@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/config"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/database"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/handler"
@@ -57,6 +58,8 @@ func main() {
 	chapterRepository := repository.NewChapterRepository(pool)
 	deviceTokenRepository := repository.NewDeviceTokenRepository(pool)
 	notificationRepository := repository.NewNotificationRepository(pool)
+	auditLogRepository := repository.NewAuditLogRepository(pool)
+	auditLogger := audit.NewLogger(auditLogRepository)
 
 	var chapterNotifier push.Notifier = push.NoopNotifier{}
 	if configuration.FirebaseCredentialsPath != "" {
@@ -73,18 +76,21 @@ func main() {
 
 	chapterService := service.NewChapterService(
 		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
+	go runScheduledPublishTicker(chapterService)
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
 		userRepository, deviceTokenRepository, configuration.JWTSecret,
 		filepath.Join(configuration.UploadsDirectory, "avatars"))
-	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
-	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
+	adminNovelHandler := handler.NewAdminNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
+	adminChapterHandler := handler.NewAdminChapterHandler(chapterService, auditLogger)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
-	notificationHandler := handler.NewNotificationHandler(notificationRepository)
-	genreHandler := handler.NewGenreHandler(genreRepository)
-	adminUserHandler := handler.NewAdminUserHandler(userRepository)
+	broadcastService := service.NewBroadcastService(deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
+	notificationHandler := handler.NewNotificationHandler(notificationRepository, broadcastService, auditLogger)
+	genreHandler := handler.NewGenreHandler(genreRepository, auditLogger)
+	adminUserHandler := handler.NewAdminUserHandler(userRepository, auditLogger)
 	adminStatsHandler := handler.NewAdminStatsHandler(repository.NewStatsRepository(pool))
+	adminAuditLogHandler := handler.NewAdminAuditLogHandler(auditLogRepository)
 
 	mux := http.NewServeMux()
 
@@ -153,6 +159,13 @@ func main() {
 
 	// Admin: overview stats
 	mux.Handle("GET /api/v1/admin/stats", requireAdmin(adminStatsHandler.Get))
+	mux.Handle("GET /api/v1/admin/stats/series", requireAdmin(adminStatsHandler.Series))
+
+	// Admin: audit log
+	mux.Handle("GET /api/v1/admin/audit-logs", requireAdmin(adminAuditLogHandler.List))
+
+	// Admin: notification composer
+	mux.Handle("POST /api/v1/admin/notifications/broadcast", requireAdmin(notificationHandler.Broadcast))
 
 	// Admin: chapters
 	mux.Handle("GET /api/v1/admin/novels/{id}/chapters", requireAdmin(adminChapterHandler.ListByNovel))
@@ -161,6 +174,7 @@ func main() {
 	mux.Handle("GET /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Get))
 	mux.Handle("PUT /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Update))
 	mux.Handle("PUT /api/v1/admin/chapters/{id}/status", requireAdmin(adminChapterHandler.UpdateStatus))
+	mux.Handle("PUT /api/v1/admin/chapters/{id}/schedule", requireAdmin(adminChapterHandler.Schedule))
 	mux.Handle("DELETE /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Delete))
 
 	// Realtime events (JWT via ?token= — browsers can't set WS headers)
@@ -174,5 +188,24 @@ func main() {
 	log.Printf("novelora_backend listening on :%s", configuration.Port)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// runScheduledPublishTicker checks every minute for draft chapters
+// whose scheduled_at has arrived and publishes them. A minute of
+// slack on "publish at exactly HH:MM" is an acceptable trade for not
+// needing a real job queue at this scale.
+func runScheduledPublishTicker(chapterService *service.ChapterService) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		published, err := chapterService.PublishDueScheduled(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("schedule: check for due chapters failed: %v", err)
+		} else if published > 0 {
+			log.Printf("schedule: auto-published %d chapter(s)", published)
+		}
 	}
 }

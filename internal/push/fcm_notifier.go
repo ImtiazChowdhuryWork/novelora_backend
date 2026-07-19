@@ -34,13 +34,23 @@ func NewFCMNotifier(ctx context.Context, credentialsPath string) (*FCMNotifier, 
 }
 
 func (notifier *FCMNotifier) NotifyNewChapter(ctx context.Context, tokens []string, novelID, novelTitle, chapterTitle string, chapterNumber int) {
-	if len(tokens) == 0 {
-		return
-	}
-
 	body := fmt.Sprintf("Chapter %d is now available", chapterNumber)
 	if chapterTitle != "" {
 		body += ": " + chapterTitle
+	}
+	notifier.sendInBatches(ctx, tokens, novelTitle, body, map[string]string{"novel_id": novelID})
+}
+
+// NotifyBroadcast sends a general announcement with no novel/chapter
+// data attached — the client already treats a missing novel_id as
+// "no navigation," so simply omitting it is enough.
+func (notifier *FCMNotifier) NotifyBroadcast(ctx context.Context, tokens []string, title, body string) {
+	notifier.sendInBatches(ctx, tokens, title, body, nil)
+}
+
+func (notifier *FCMNotifier) sendInBatches(ctx context.Context, tokens []string, title, body string, data map[string]string) {
+	if len(tokens) == 0 {
+		return
 	}
 
 	for start := 0; start < len(tokens); start += fcmBatchSize {
@@ -50,12 +60,10 @@ func (notifier *FCMNotifier) NotifyNewChapter(ctx context.Context, tokens []stri
 		response, err := notifier.client.SendEachForMulticast(ctx, &messaging.MulticastMessage{
 			Tokens: batch,
 			Notification: &messaging.Notification{
-				Title: novelTitle,
+				Title: title,
 				Body:  body,
 			},
-			Data: map[string]string{
-				"novel_id": novelID,
-			},
+			Data: data,
 		})
 		if err != nil {
 			log.Printf("push: multicast send failed: %v", err)

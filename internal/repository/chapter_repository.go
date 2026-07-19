@@ -24,6 +24,7 @@ type Chapter struct {
 	WordCount   int
 	Status      string // "draft" | "published"
 	PublishedAt *time.Time
+	ScheduledAt *time.Time // set while a draft is queued for auto-publish
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -53,7 +54,7 @@ func (repository *ChapterRepository) ListByNovel(ctx context.Context, novelID st
 		statusCondition = " AND status = 'published'"
 	}
 	rows, err := repository.pool.Query(ctx, `
-		SELECT id, novel_id, number, title, word_count, status, published_at, created_at, updated_at
+		SELECT id, novel_id, number, title, word_count, status, published_at, scheduled_at, created_at, updated_at
 		FROM chapters WHERE novel_id = $1`+statusCondition+` ORDER BY number`, novelID)
 	if err != nil {
 		return nil, fmt.Errorf("list chapters: %w", err)
@@ -65,7 +66,7 @@ func (repository *ChapterRepository) ListByNovel(ctx context.Context, novelID st
 		chapter := &Chapter{}
 		if err := rows.Scan(
 			&chapter.ID, &chapter.NovelID, &chapter.Number, &chapter.Title,
-			&chapter.WordCount, &chapter.Status, &chapter.PublishedAt,
+			&chapter.WordCount, &chapter.Status, &chapter.PublishedAt, &chapter.ScheduledAt,
 			&chapter.CreatedAt, &chapter.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan chapter: %w", err)
@@ -79,12 +80,12 @@ func (repository *ChapterRepository) GetByID(ctx context.Context, chapterID stri
 	chapter := &Chapter{}
 	err := repository.pool.QueryRow(ctx, `
 		SELECT id, novel_id, number, title, content_json, content_text, word_count,
-		       status, published_at, created_at, updated_at
+		       status, published_at, scheduled_at, created_at, updated_at
 		FROM chapters WHERE id = $1`, chapterID,
 	).Scan(
 		&chapter.ID, &chapter.NovelID, &chapter.Number, &chapter.Title,
 		&chapter.ContentJSON, &chapter.ContentText, &chapter.WordCount,
-		&chapter.Status, &chapter.PublishedAt, &chapter.CreatedAt, &chapter.UpdatedAt,
+		&chapter.Status, &chapter.PublishedAt, &chapter.ScheduledAt, &chapter.CreatedAt, &chapter.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrChapterNotFound
@@ -107,12 +108,12 @@ func (repository *ChapterRepository) Create(ctx context.Context, novelID string,
 		INSERT INTO chapters (novel_id, number, title, content_json, content_text, word_count)
 		SELECT $1, next_number.number, $2, $3, $4, $5 FROM next_number
 		RETURNING id, novel_id, number, title, content_json, content_text, word_count,
-		          status, published_at, created_at, updated_at`,
+		          status, published_at, scheduled_at, created_at, updated_at`,
 		novelID, write.Title, write.ContentJSON, write.ContentText, write.WordCount,
 	).Scan(
 		&chapter.ID, &chapter.NovelID, &chapter.Number, &chapter.Title,
 		&chapter.ContentJSON, &chapter.ContentText, &chapter.WordCount,
-		&chapter.Status, &chapter.PublishedAt, &chapter.CreatedAt, &chapter.UpdatedAt,
+		&chapter.Status, &chapter.PublishedAt, &chapter.ScheduledAt, &chapter.CreatedAt, &chapter.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert chapter: %w", err)
@@ -169,11 +170,14 @@ func (repository *ChapterRepository) Update(ctx context.Context, chapterID strin
 	return repository.GetByID(ctx, chapterID)
 }
 
-// UpdateStatus publishes or unpublishes; published_at tracks the change.
+// UpdateStatus publishes or unpublishes; published_at tracks the
+// change. Publishing also clears any pending schedule — the chapter is
+// no longer "waiting," it's live.
 func (repository *ChapterRepository) UpdateStatus(ctx context.Context, chapterID, status string) (*Chapter, error) {
 	commandTag, err := repository.pool.Exec(ctx, `
 		UPDATE chapters SET status = $2,
 		       published_at = CASE WHEN $2 = 'published' THEN now() ELSE NULL END,
+		       scheduled_at = CASE WHEN $2 = 'published' THEN NULL ELSE scheduled_at END,
 		       updated_at = now()
 		WHERE id = $1`, chapterID, status)
 	if err != nil {
@@ -183,6 +187,50 @@ func (repository *ChapterRepository) UpdateStatus(ctx context.Context, chapterID
 		return nil, ErrChapterNotFound
 	}
 	return repository.GetByID(ctx, chapterID)
+}
+
+// SetScheduledAt queues (or, with nil, un-queues) a draft chapter for
+// automatic publishing. Only meaningful for drafts — the background
+// ticker only ever looks at draft rows, and UpdateStatus clears this
+// the moment a chapter actually publishes.
+func (repository *ChapterRepository) SetScheduledAt(ctx context.Context, chapterID string, scheduledAt *time.Time) (*Chapter, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE chapters SET scheduled_at = $2, updated_at = now() WHERE id = $1 AND status = 'draft'",
+		chapterID, scheduledAt)
+	if err != nil {
+		return nil, fmt.Errorf("set chapter schedule: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return nil, ErrChapterNotFound
+	}
+	return repository.GetByID(ctx, chapterID)
+}
+
+// ListDueForPublish returns draft chapters whose schedule has arrived —
+// what the background ticker auto-publishes.
+func (repository *ChapterRepository) ListDueForPublish(ctx context.Context, asOf time.Time) ([]*Chapter, error) {
+	rows, err := repository.pool.Query(ctx, `
+		SELECT id, novel_id, number, title, word_count, status, published_at, scheduled_at, created_at, updated_at
+		FROM chapters
+		WHERE status = 'draft' AND scheduled_at IS NOT NULL AND scheduled_at <= $1`, asOf)
+	if err != nil {
+		return nil, fmt.Errorf("list due chapters: %w", err)
+	}
+	defer rows.Close()
+
+	chapters := []*Chapter{}
+	for rows.Next() {
+		chapter := &Chapter{}
+		if err := rows.Scan(
+			&chapter.ID, &chapter.NovelID, &chapter.Number, &chapter.Title,
+			&chapter.WordCount, &chapter.Status, &chapter.PublishedAt, &chapter.ScheduledAt,
+			&chapter.CreatedAt, &chapter.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan due chapter: %w", err)
+		}
+		chapters = append(chapters, chapter)
+	}
+	return chapters, rows.Err()
 }
 
 func (repository *ChapterRepository) Delete(ctx context.Context, chapterID string) error {

@@ -5,24 +5,59 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
 
-// NotificationHandler serves the signed-in reader's in-app inbox.
-// Every route here requires the Authenticate middleware.
+// NotificationHandler serves the signed-in reader's in-app inbox
+// (Authenticate) and the admin composer's broadcast send (RequireAdmin
+// too — wired separately in main.go).
 type NotificationHandler struct {
 	notifications *repository.NotificationRepository
+	broadcasts    *service.BroadcastService
+	auditLogger   *audit.Logger
 }
 
-func NewNotificationHandler(notifications *repository.NotificationRepository) *NotificationHandler {
-	return &NotificationHandler{notifications: notifications}
+func NewNotificationHandler(
+	notifications *repository.NotificationRepository,
+	broadcasts *service.BroadcastService,
+	auditLogger *audit.Logger,
+) *NotificationHandler {
+	return &NotificationHandler{
+		notifications: notifications,
+		broadcasts:    broadcasts,
+		auditLogger:   auditLogger,
+	}
+}
+
+type broadcastRequest struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+// Broadcast: POST /admin/notifications/broadcast — sends a general
+// announcement to every account's inbox + device.
+func (notificationHandler *NotificationHandler) Broadcast(responseWriter http.ResponseWriter, request *http.Request) {
+	var broadcastRequest broadcastRequest
+	if !decodeJSON(responseWriter, request, &broadcastRequest) {
+		return
+	}
+	if err := notificationHandler.broadcasts.Send(request.Context(), broadcastRequest.Title, broadcastRequest.Body); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	notificationHandler.auditLogger.Log(actorID, actorName, "notification.broadcast", "notification", "",
+		map[string]any{"title": broadcastRequest.Title})
+	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
 type notificationResponse struct {
 	ID        string    `json:"id"`
-	NovelID   string    `json:"novel_id"`
-	ChapterID string    `json:"chapter_id"`
+	NovelID   *string   `json:"novel_id"`
+	ChapterID *string   `json:"chapter_id"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	IsRead    bool      `json:"is_read"`

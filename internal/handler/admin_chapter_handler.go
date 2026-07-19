@@ -4,16 +4,18 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
 
 type AdminChapterHandler struct {
 	chapterService *service.ChapterService
+	auditLogger    *audit.Logger
 }
 
-func NewAdminChapterHandler(chapterService *service.ChapterService) *AdminChapterHandler {
-	return &AdminChapterHandler{chapterService: chapterService}
+func NewAdminChapterHandler(chapterService *service.ChapterService, auditLogger *audit.Logger) *AdminChapterHandler {
+	return &AdminChapterHandler{chapterService: chapterService, auditLogger: auditLogger}
 }
 
 type chapterWriteRequest struct {
@@ -39,6 +41,7 @@ type chapterListItemResponse struct {
 	WordCount   int        `json:"word_count"`
 	Status      string     `json:"status"`
 	PublishedAt *time.Time `json:"published_at"`
+	ScheduledAt *time.Time `json:"scheduled_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
@@ -57,6 +60,7 @@ func newChapterListItemResponse(chapter *repository.Chapter) chapterListItemResp
 		WordCount:   chapter.WordCount,
 		Status:      chapter.Status,
 		PublishedAt: chapter.PublishedAt,
+		ScheduledAt: chapter.ScheduledAt,
 		UpdatedAt:   chapter.UpdatedAt,
 	}
 }
@@ -163,14 +167,64 @@ func (adminChapterHandler *AdminChapterHandler) UpdateStatus(responseWriter http
 		writeServiceError(responseWriter, err)
 		return
 	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminChapterHandler.auditLogger.Log(actorID, actorName, "chapter."+chapter.Status, "chapter", chapter.ID,
+		map[string]any{"novel_id": chapter.NovelID, "number": chapter.Number, "title": chapter.Title})
+	writeJSON(responseWriter, http.StatusOK, newChapterResponse(chapter))
+}
+
+type chapterScheduleRequest struct {
+	// RFC3339; null/omitted clears the schedule.
+	ScheduledAt *time.Time `json:"scheduled_at"`
+}
+
+// Schedule: PUT /admin/chapters/{id}/schedule — set or clear a
+// draft's auto-publish time.
+func (adminChapterHandler *AdminChapterHandler) Schedule(responseWriter http.ResponseWriter, request *http.Request) {
+	var scheduleRequest chapterScheduleRequest
+	if !decodeJSON(responseWriter, request, &scheduleRequest) {
+		return
+	}
+
+	chapterID := request.PathValue("id")
+	var chapter *repository.Chapter
+	var err error
+	var action string
+	if scheduleRequest.ScheduledAt != nil {
+		chapter, err = adminChapterHandler.chapterService.Schedule(request.Context(), chapterID, *scheduleRequest.ScheduledAt)
+		action = "chapter.scheduled"
+	} else {
+		chapter, err = adminChapterHandler.chapterService.Unschedule(request.Context(), chapterID)
+		action = "chapter.unscheduled"
+	}
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+
+	actorID, actorName := actorFromContext(request.Context())
+	details := map[string]any{"novel_id": chapter.NovelID, "number": chapter.Number, "title": chapter.Title}
+	if chapter.ScheduledAt != nil {
+		details["scheduled_at"] = chapter.ScheduledAt
+	}
+	adminChapterHandler.auditLogger.Log(actorID, actorName, action, "chapter", chapter.ID, details)
 	writeJSON(responseWriter, http.StatusOK, newChapterResponse(chapter))
 }
 
 // Delete: DELETE /admin/chapters/{id}
 func (adminChapterHandler *AdminChapterHandler) Delete(responseWriter http.ResponseWriter, request *http.Request) {
-	if err := adminChapterHandler.chapterService.Delete(request.Context(), request.PathValue("id")); err != nil {
+	chapterID := request.PathValue("id")
+	chapter, err := adminChapterHandler.chapterService.Get(request.Context(), chapterID)
+	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
+	if err := adminChapterHandler.chapterService.Delete(request.Context(), chapterID); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminChapterHandler.auditLogger.Log(actorID, actorName, "chapter.deleted", "chapter", chapterID,
+		map[string]any{"novel_id": chapter.NovelID, "number": chapter.Number, "title": chapter.Title})
 	responseWriter.WriteHeader(http.StatusNoContent)
 }

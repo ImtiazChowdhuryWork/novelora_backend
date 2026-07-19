@@ -159,6 +159,55 @@ func (chapterService *ChapterService) UpdateStatus(ctx context.Context, chapterI
 	return chapter, nil
 }
 
+// Schedule queues a draft chapter to auto-publish at scheduledAt.
+// Publishing already has its own path (UpdateStatus) — this only ever
+// touches drafts.
+func (chapterService *ChapterService) Schedule(ctx context.Context, chapterID string, scheduledAt time.Time) (*repository.Chapter, error) {
+	if !scheduledAt.After(time.Now()) {
+		return nil, &ValidationError{Message: "scheduled time must be in the future"}
+	}
+	chapter, err := chapterService.chapters.GetByID(ctx, chapterID)
+	if err != nil {
+		return nil, err
+	}
+	if chapter.Status != "draft" {
+		return nil, &ValidationError{Message: "only draft chapters can be scheduled"}
+	}
+	chapter, err = chapterService.chapters.SetScheduledAt(ctx, chapterID, &scheduledAt)
+	if err != nil {
+		return nil, err
+	}
+	chapterService.events.Publish(realtime.Event{Topic: "chapter.updated", ID: chapter.NovelID})
+	return chapter, nil
+}
+
+// Unschedule clears a pending schedule; the chapter stays a draft.
+func (chapterService *ChapterService) Unschedule(ctx context.Context, chapterID string) (*repository.Chapter, error) {
+	chapter, err := chapterService.chapters.SetScheduledAt(ctx, chapterID, nil)
+	if err != nil {
+		return nil, err
+	}
+	chapterService.events.Publish(realtime.Event{Topic: "chapter.updated", ID: chapter.NovelID})
+	return chapter, nil
+}
+
+// PublishDueScheduled auto-publishes every draft whose schedule has
+// arrived. Called periodically by a background ticker (see main.go).
+// Reuses UpdateStatus so a scheduled publish behaves identically to a
+// manual one — push, inbox, and realtime all fire the same way.
+func (chapterService *ChapterService) PublishDueScheduled(ctx context.Context) (int, error) {
+	due, err := chapterService.chapters.ListDueForPublish(ctx, time.Now())
+	if err != nil {
+		return 0, err
+	}
+	for _, chapter := range due {
+		if _, err := chapterService.UpdateStatus(ctx, chapter.ID, "published"); err != nil {
+			log.Printf("schedule: could not auto-publish chapter %s: %v", chapter.ID, err)
+		}
+	}
+	return len(due), nil
+}
+
 // notifyNewChapterPublished runs on its own timeout-bounded context —
 // never the request's — so a slow or failing push provider can't delay
 // or fail the publish response. Runs after UpdateStatus already

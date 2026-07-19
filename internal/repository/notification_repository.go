@@ -12,9 +12,10 @@ import (
 var ErrNotificationNotFound = errors.New("notification not found")
 
 type Notification struct {
-	ID        string
-	NovelID   string
-	ChapterID string
+	ID string
+	// Nil for an admin broadcast not tied to a specific chapter.
+	NovelID   *string
+	ChapterID *string
 	Title     string
 	Body      string
 	IsRead    bool
@@ -40,6 +41,20 @@ func (repository *NotificationRepository) CreateForAllUsers(ctx context.Context,
 		novelID, chapterID, title, body)
 	if err != nil {
 		return fmt.Errorf("create notifications: %w", err)
+	}
+	return nil
+}
+
+// CreateBroadcastForAllUsers is the admin composer's send: a general
+// announcement with no novel/chapter behind it, so a tap just opens
+// the inbox instead of navigating anywhere.
+func (repository *NotificationRepository) CreateBroadcastForAllUsers(ctx context.Context, title, body string) error {
+	_, err := repository.pool.Exec(ctx, `
+		INSERT INTO notifications (user_id, title, body)
+		SELECT id, $1, $2 FROM users`,
+		title, body)
+	if err != nil {
+		return fmt.Errorf("create broadcast notifications: %w", err)
 	}
 	return nil
 }
