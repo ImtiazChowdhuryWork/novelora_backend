@@ -117,6 +117,21 @@ func (novelService *NovelService) UpdateCover(ctx context.Context, novelID, cove
 	return nil
 }
 
+// Reorder sets the manual display order to exactly novelIDs, in the
+// order given (index 0 = first). Meant for the whole unfiltered
+// catalog — reordering a filtered subset would silently interleave it
+// with whatever wasn't included.
+func (novelService *NovelService) Reorder(ctx context.Context, novelIDs []string) error {
+	if len(novelIDs) == 0 {
+		return &ValidationError{Message: "novel_ids is required"}
+	}
+	if err := novelService.novels.Reorder(ctx, novelIDs); err != nil {
+		return err
+	}
+	novelService.events.Publish(realtime.Event{Topic: "novel.updated"})
+	return nil
+}
+
 func (novelService *NovelService) Delete(ctx context.Context, novelID string) error {
 	if err := novelService.novels.SoftDelete(ctx, novelID); err != nil {
 		return err

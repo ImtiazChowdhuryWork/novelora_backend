@@ -27,8 +27,11 @@ type Novel struct {
 	ViewCount         int64
 	PublishedChapters int
 	TotalChapters     int
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// SortOrder is the admin's manual display order (lower = earlier).
+	// New novels are appended to the end; see Reorder for changing it.
+	SortOrder int
+	CreatedAt time.Time
+	UpdatedAt time.Time
 	// Genres is populated by NovelService, not this repository — see
 	// GenreRepository.ListForNovel(s). Nil until attached.
 	Genres []*Genre
@@ -68,7 +71,7 @@ const novelColumns = `
 	n.status, n.is_short, n.is_recommended, n.rating, n.view_count,
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id AND c.status = 'published'),
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id),
-	n.created_at, n.updated_at`
+	n.sort_order, n.created_at, n.updated_at`
 
 func scanNovel(row pgx.Row) (*Novel, error) {
 	novel := &Novel{}
@@ -76,7 +79,7 @@ func scanNovel(row pgx.Row) (*Novel, error) {
 		&novel.ID, &novel.Title, &novel.AuthorName, &novel.Synopsis, &novel.CoverURL,
 		&novel.Status, &novel.IsShort, &novel.IsRecommended, &novel.Rating, &novel.ViewCount,
 		&novel.PublishedChapters, &novel.TotalChapters,
-		&novel.CreatedAt, &novel.UpdatedAt,
+		&novel.SortOrder, &novel.CreatedAt, &novel.UpdatedAt,
 	)
 	return novel, err
 }
@@ -115,7 +118,7 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 
 	arguments = append(arguments, filter.PageSize, (filter.Page-1)*filter.PageSize)
 	rows, err := repository.pool.Query(ctx, fmt.Sprintf(
-		"SELECT %s FROM novels n WHERE %s ORDER BY n.updated_at DESC LIMIT $%d OFFSET $%d",
+		"SELECT %s FROM novels n WHERE %s ORDER BY n.sort_order ASC, n.created_at DESC LIMIT $%d OFFSET $%d",
 		novelColumns, whereClause, len(arguments)-1, len(arguments)), arguments...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list novels: %w", err)
@@ -146,11 +149,12 @@ func (repository *NovelRepository) GetByID(ctx context.Context, novelID string) 
 	return novel, nil
 }
 
+// Create appends the new novel to the end of the manual display order.
 func (repository *NovelRepository) Create(ctx context.Context, write NovelWrite) (*Novel, error) {
 	novel, err := scanNovel(repository.pool.QueryRow(ctx, `
 		WITH inserted AS (
-			INSERT INTO novels (title, author_name, synopsis, status, is_short, is_recommended, rating)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO novels (title, author_name, synopsis, status, is_short, is_recommended, rating, sort_order)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT coalesce(max(sort_order), 0) + 1 FROM novels))
 			RETURNING *
 		)
 		SELECT `+novelColumns+` FROM inserted n`,
@@ -160,6 +164,31 @@ func (repository *NovelRepository) Create(ctx context.Context, write NovelWrite)
 		return nil, fmt.Errorf("insert novel: %w", err)
 	}
 	return novel, nil
+}
+
+// Reorder assigns sort_order = index for each id in novelIDs, in the
+// order given. IDs not owned by any novel are silently skipped (no
+// error) — the caller sent a stale id, not a serious enough problem
+// to fail the whole reorder.
+func (repository *NovelRepository) Reorder(ctx context.Context, novelIDs []string) error {
+	transaction, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin reorder: %w", err)
+	}
+	defer transaction.Rollback(ctx)
+
+	for index, novelID := range novelIDs {
+		if _, err := transaction.Exec(ctx,
+			"UPDATE novels SET sort_order = $1 WHERE id = $2 AND deleted_at IS NULL",
+			index, novelID,
+		); err != nil {
+			return fmt.Errorf("reorder novel %s: %w", novelID, err)
+		}
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit reorder: %w", err)
+	}
+	return nil
 }
 
 func (repository *NovelRepository) Update(ctx context.Context, novelID string, write NovelWrite) (*Novel, error) {

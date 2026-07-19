@@ -142,6 +142,7 @@ func main() {
 	}
 	mux.Handle("GET /api/v1/admin/novels", requireAdmin(adminNovelHandler.List))
 	mux.Handle("POST /api/v1/admin/novels", requireAdmin(adminNovelHandler.Create))
+	mux.Handle("PUT /api/v1/admin/novels/reorder", requireAdmin(adminNovelHandler.Reorder))
 	mux.Handle("GET /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Get))
 	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))

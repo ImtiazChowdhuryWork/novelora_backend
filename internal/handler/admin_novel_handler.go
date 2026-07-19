@@ -69,6 +69,7 @@ type novelResponse struct {
 	PublishedChapters int             `json:"published_chapters"`
 	TotalChapters     int             `json:"total_chapters"`
 	Genres            []genreResponse `json:"genres"`
+	SortOrder         int             `json:"sort_order"`
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
 }
@@ -92,6 +93,7 @@ func newNovelResponse(novel *repository.Novel) novelResponse {
 		PublishedChapters: novel.PublishedChapters,
 		TotalChapters:     novel.TotalChapters,
 		Genres:            genres,
+		SortOrder:         novel.SortOrder,
 		CreatedAt:         novel.CreatedAt,
 		UpdatedAt:         novel.UpdatedAt,
 	}
@@ -182,6 +184,28 @@ func (adminNovelHandler *AdminNovelHandler) Delete(responseWriter http.ResponseW
 	actorID, actorName := actorFromContext(request.Context())
 	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.deleted", "novel", novelID,
 		map[string]any{"title": novel.Title})
+	responseWriter.WriteHeader(http.StatusNoContent)
+}
+
+type novelReorderRequest struct {
+	NovelIDs []string `json:"novel_ids"`
+}
+
+// Reorder: PUT /admin/novels/reorder — sets the manual display order
+// to exactly the given id list (index 0 = first). Meant for the whole
+// unfiltered catalog; see NovelService.Reorder.
+func (adminNovelHandler *AdminNovelHandler) Reorder(responseWriter http.ResponseWriter, request *http.Request) {
+	var reorderRequest novelReorderRequest
+	if !decodeJSON(responseWriter, request, &reorderRequest) {
+		return
+	}
+	if err := adminNovelHandler.novelService.Reorder(request.Context(), reorderRequest.NovelIDs); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.reordered", "novel", "",
+		map[string]any{"count": len(reorderRequest.NovelIDs)})
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
