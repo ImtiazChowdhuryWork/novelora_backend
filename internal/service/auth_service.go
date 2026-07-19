@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/api/idtoken"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 )
 
@@ -44,6 +45,7 @@ const (
 type AuthService struct {
 	users           *repository.UserRepository
 	refreshTokens   *repository.RefreshTokenRepository
+	events          realtime.Publisher
 	jwtSecret       []byte
 	accessTokenTTL  time.Duration
 	refreshTokenTTL time.Duration
@@ -53,6 +55,7 @@ type AuthService struct {
 func NewAuthService(
 	users *repository.UserRepository,
 	refreshTokens *repository.RefreshTokenRepository,
+	events realtime.Publisher,
 	jwtSecret []byte,
 	accessTokenTTL time.Duration,
 	refreshTokenTTL time.Duration,
@@ -61,6 +64,7 @@ func NewAuthService(
 	return &AuthService{
 		users:           users,
 		refreshTokens:   refreshTokens,
+		events:          events,
 		jwtSecret:       jwtSecret,
 		accessTokenTTL:  accessTokenTTL,
 		refreshTokenTTL: refreshTokenTTL,
@@ -99,6 +103,7 @@ func (authService *AuthService) Register(ctx context.Context, username, email, p
 	if err != nil {
 		return nil, err
 	}
+	authService.events.Publish(realtime.Event{Topic: "user.registered", ID: user.ID})
 	return authService.issueTokens(ctx, user)
 }
 
@@ -162,6 +167,7 @@ func (authService *AuthService) LoginWithGoogle(ctx context.Context, googleIDTok
 	if err != nil {
 		return nil, err
 	}
+	authService.events.Publish(realtime.Event{Topic: "user.registered", ID: user.ID})
 	return authService.issueTokens(ctx, user)
 }
 
@@ -265,6 +271,7 @@ func (authService *AuthService) issueTokens(ctx context.Context, user *repositor
 	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":  user.ID,
 		"name": user.Username,
+		"role": user.Role,
 		"iat":  now.Unix(),
 		"exp":  now.Add(authService.accessTokenTTL).Unix(),
 	}).SignedString(authService.jwtSecret)

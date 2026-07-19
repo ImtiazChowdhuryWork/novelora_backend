@@ -11,6 +11,7 @@ import (
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/database"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/handler"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
@@ -36,17 +37,30 @@ func main() {
 
 	userRepository := repository.NewUserRepository(pool)
 	refreshTokenRepository := repository.NewRefreshTokenRepository(pool)
+
+	eventHub := realtime.NewHub()
+	go eventHub.Run()
+
 	authService := service.NewAuthService(
 		userRepository,
 		refreshTokenRepository,
+		eventHub,
 		configuration.JWTSecret,
 		configuration.AccessTokenTTL,
 		configuration.RefreshTokenTTL,
 		configuration.GoogleClientID,
 	)
+	novelRepository := repository.NewNovelRepository(pool)
+	novelService := service.NewNovelService(novelRepository, eventHub)
+	chapterRepository := repository.NewChapterRepository(pool)
+	chapterService := service.NewChapterService(chapterRepository, novelRepository, eventHub)
+
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
 		userRepository, filepath.Join(configuration.UploadsDirectory, "avatars"))
+	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
+	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
+	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
 
 	mux := http.NewServeMux()
 
@@ -71,6 +85,36 @@ func main() {
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
 		http.FileServer(http.Dir(configuration.UploadsDirectory))))
+
+	// Public catalog (reader-facing; published content only)
+	mux.HandleFunc("GET /api/v1/novels", publicNovelHandler.List)
+	mux.HandleFunc("GET /api/v1/novels/{id}", publicNovelHandler.Get)
+	mux.HandleFunc("GET /api/v1/novels/{id}/chapters", publicNovelHandler.Chapters)
+	mux.HandleFunc("GET /api/v1/chapters/{id}", publicNovelHandler.Chapter)
+
+	// Admin: novels (JWT + admin role)
+	requireAdmin := func(handlerFunc http.HandlerFunc) http.Handler {
+		return middleware.Authenticate(configuration.JWTSecret,
+			middleware.RequireAdmin(handlerFunc))
+	}
+	mux.Handle("GET /api/v1/admin/novels", requireAdmin(adminNovelHandler.List))
+	mux.Handle("POST /api/v1/admin/novels", requireAdmin(adminNovelHandler.Create))
+	mux.Handle("GET /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Get))
+	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
+	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))
+	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
+
+	// Admin: chapters
+	mux.Handle("GET /api/v1/admin/novels/{id}/chapters", requireAdmin(adminChapterHandler.ListByNovel))
+	mux.Handle("POST /api/v1/admin/novels/{id}/chapters", requireAdmin(adminChapterHandler.Create))
+	mux.Handle("POST /api/v1/admin/novels/{id}/chapters/import", requireAdmin(adminChapterHandler.Import))
+	mux.Handle("GET /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Get))
+	mux.Handle("PUT /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Update))
+	mux.Handle("PUT /api/v1/admin/chapters/{id}/status", requireAdmin(adminChapterHandler.UpdateStatus))
+	mux.Handle("DELETE /api/v1/admin/chapters/{id}", requireAdmin(adminChapterHandler.Delete))
+
+	// Realtime events (JWT via ?token= — browsers can't set WS headers)
+	mux.Handle("GET /ws", realtime.NewWSHandler(eventHub, configuration.JWTSecret))
 
 	server := &http.Server{
 		Addr:    ":" + configuration.Port,

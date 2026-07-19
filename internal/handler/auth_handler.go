@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -43,6 +42,7 @@ type userResponse struct {
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
 	AvatarURL string    `json:"avatar_url"`
+	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -60,6 +60,7 @@ func newAuthResponse(result *service.AuthResult) authResponse {
 			Username:  result.User.Username,
 			Email:     result.User.Email,
 			AvatarURL: result.User.AvatarURL,
+			Role:      result.User.Role,
 			CreatedAt: result.User.CreatedAt,
 		},
 		AccessToken:  result.AccessToken,
@@ -148,15 +149,10 @@ func (authHandler *AuthHandler) Logout(responseWriter http.ResponseWriter, reque
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
-// decodeJSON parses the request body into destination; on failure it
-// writes a 400 and returns false.
+// decodeJSON parses a normal-sized request body into destination; on
+// failure it writes a 400 and returns false.
 func decodeJSON(responseWriter http.ResponseWriter, request *http.Request, destination any) bool {
-	request.Body = http.MaxBytesReader(responseWriter, request.Body, 1<<20)
-	if err := json.NewDecoder(request.Body).Decode(destination); err != nil {
-		writeError(responseWriter, http.StatusBadRequest, "request body is not valid JSON")
-		return false
-	}
-	return true
+	return decodeJSONWithLimit(responseWriter, request, destination, 1<<20)
 }
 
 func writeError(responseWriter http.ResponseWriter, statusCode int, message string) {
@@ -172,6 +168,9 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 	case errors.Is(err, repository.ErrEmailTaken),
 		errors.Is(err, repository.ErrUsernameTaken):
 		writeError(responseWriter, http.StatusConflict, err.Error())
+	case errors.Is(err, repository.ErrNovelNotFound),
+		errors.Is(err, repository.ErrChapterNotFound):
+		writeError(responseWriter, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials),
 		errors.Is(err, service.ErrInvalidRefreshToken),
 		errors.Is(err, service.ErrInvalidGoogleToken):
