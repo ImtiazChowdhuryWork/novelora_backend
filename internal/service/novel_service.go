@@ -28,8 +28,14 @@ func (novelService *NovelService) List(ctx context.Context, filter repository.No
 	if filter.Page < 1 {
 		filter.Page = 1
 	}
-	if filter.PageSize < 1 || filter.PageSize > 100 {
+	switch {
+	case filter.PageSize < 1:
 		filter.PageSize = 20
+	case filter.PageSize > 500:
+		// Clamp down rather than resetting to the default — the admin
+		// dashboard's drag-to-reorder view asks for a large page size on
+		// purpose (it needs the whole catalog loaded, not just page 1).
+		filter.PageSize = 500
 	}
 	if filter.Status != "" && filter.Status != "ongoing" && filter.Status != "completed" {
 		return nil, 0, &ValidationError{Message: "status must be 'ongoing' or 'completed'"}
