@@ -32,6 +32,7 @@ type novelWriteRequest struct {
 	IsShort       bool     `json:"is_short"`
 	IsRecommended bool     `json:"is_recommended"`
 	Rating        *float64 `json:"rating"`
+	GenreIDs      []string `json:"genre_ids"`
 }
 
 func (writeRequest novelWriteRequest) toWrite() repository.NovelWrite {
@@ -46,24 +47,34 @@ func (writeRequest novelWriteRequest) toWrite() repository.NovelWrite {
 	}
 }
 
+type genreResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type novelResponse struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	AuthorName        string    `json:"author_name"`
-	Synopsis          string    `json:"synopsis"`
-	CoverURL          string    `json:"cover_url"`
-	Status            string    `json:"status"`
-	IsShort           bool      `json:"is_short"`
-	IsRecommended     bool      `json:"is_recommended"`
-	Rating            *float64  `json:"rating"`
-	ViewCount         int64     `json:"view_count"`
-	PublishedChapters int       `json:"published_chapters"`
-	TotalChapters     int       `json:"total_chapters"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string          `json:"id"`
+	Title             string          `json:"title"`
+	AuthorName        string          `json:"author_name"`
+	Synopsis          string          `json:"synopsis"`
+	CoverURL          string          `json:"cover_url"`
+	Status            string          `json:"status"`
+	IsShort           bool            `json:"is_short"`
+	IsRecommended     bool            `json:"is_recommended"`
+	Rating            *float64        `json:"rating"`
+	ViewCount         int64           `json:"view_count"`
+	PublishedChapters int             `json:"published_chapters"`
+	TotalChapters     int             `json:"total_chapters"`
+	Genres            []genreResponse `json:"genres"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 func newNovelResponse(novel *repository.Novel) novelResponse {
+	genres := make([]genreResponse, 0, len(novel.Genres))
+	for _, genre := range novel.Genres {
+		genres = append(genres, genreResponse{ID: genre.ID, Name: genre.Name})
+	}
 	return novelResponse{
 		ID:                novel.ID,
 		Title:             novel.Title,
@@ -77,6 +88,7 @@ func newNovelResponse(novel *repository.Novel) novelResponse {
 		ViewCount:         novel.ViewCount,
 		PublishedChapters: novel.PublishedChapters,
 		TotalChapters:     novel.TotalChapters,
+		Genres:            genres,
 		CreatedAt:         novel.CreatedAt,
 		UpdatedAt:         novel.UpdatedAt,
 	}
@@ -125,7 +137,7 @@ func (adminNovelHandler *AdminNovelHandler) Create(responseWriter http.ResponseW
 	if !decodeJSON(responseWriter, request, &writeRequest) {
 		return
 	}
-	novel, err := adminNovelHandler.novelService.Create(request.Context(), writeRequest.toWrite())
+	novel, err := adminNovelHandler.novelService.Create(request.Context(), writeRequest.toWrite(), writeRequest.GenreIDs)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
@@ -139,7 +151,7 @@ func (adminNovelHandler *AdminNovelHandler) Update(responseWriter http.ResponseW
 		return
 	}
 	novel, err := adminNovelHandler.novelService.Update(
-		request.Context(), request.PathValue("id"), writeRequest.toWrite())
+		request.Context(), request.PathValue("id"), writeRequest.toWrite(), writeRequest.GenreIDs)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return

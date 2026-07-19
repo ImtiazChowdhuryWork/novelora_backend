@@ -29,6 +29,9 @@ type Novel struct {
 	TotalChapters     int
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	// Genres is populated by NovelService, not this repository — see
+	// GenreRepository.ListForNovel(s). Nil until attached.
+	Genres []*Genre
 }
 
 // NovelListFilter narrows and pages the novels list.

@@ -52,7 +52,8 @@ func main() {
 		configuration.GoogleClientID,
 	)
 	novelRepository := repository.NewNovelRepository(pool)
-	novelService := service.NewNovelService(novelRepository, eventHub)
+	genreRepository := repository.NewGenreRepository(pool)
+	novelService := service.NewNovelService(novelRepository, genreRepository, eventHub)
 	chapterRepository := repository.NewChapterRepository(pool)
 	deviceTokenRepository := repository.NewDeviceTokenRepository(pool)
 	notificationRepository := repository.NewNotificationRepository(pool)
@@ -81,6 +82,9 @@ func main() {
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
 	notificationHandler := handler.NewNotificationHandler(notificationRepository)
+	genreHandler := handler.NewGenreHandler(genreRepository)
+	adminUserHandler := handler.NewAdminUserHandler(userRepository)
+	adminStatsHandler := handler.NewAdminStatsHandler(repository.NewStatsRepository(pool))
 
 	mux := http.NewServeMux()
 
@@ -123,6 +127,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/novels/{id}", publicNovelHandler.Get)
 	mux.HandleFunc("GET /api/v1/novels/{id}/chapters", publicNovelHandler.Chapters)
 	mux.HandleFunc("GET /api/v1/chapters/{id}", publicNovelHandler.Chapter)
+	mux.HandleFunc("GET /api/v1/genres", genreHandler.List)
 
 	// Admin: novels (JWT + admin role)
 	requireAdmin := func(handlerFunc http.HandlerFunc) http.Handler {
@@ -135,6 +140,19 @@ func main() {
 	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))
 	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
+
+	// Admin: genres
+	mux.Handle("GET /api/v1/admin/genres", requireAdmin(genreHandler.List))
+	mux.Handle("POST /api/v1/admin/genres", requireAdmin(genreHandler.Create))
+	mux.Handle("DELETE /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Delete))
+
+	// Admin: users
+	mux.Handle("GET /api/v1/admin/users", requireAdmin(adminUserHandler.List))
+	mux.Handle("PUT /api/v1/admin/users/{id}/role", requireAdmin(adminUserHandler.UpdateRole))
+	mux.Handle("PUT /api/v1/admin/users/{id}/ban", requireAdmin(adminUserHandler.UpdateBanned))
+
+	// Admin: overview stats
+	mux.Handle("GET /api/v1/admin/stats", requireAdmin(adminStatsHandler.Get))
 
 	// Admin: chapters
 	mux.Handle("GET /api/v1/admin/novels/{id}/chapters", requireAdmin(adminChapterHandler.ListByNovel))
