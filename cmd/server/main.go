@@ -50,9 +50,13 @@ func main() {
 		configuration.RefreshTokenTTL,
 		configuration.GoogleClientID,
 	)
+	novelRepository := repository.NewNovelRepository(pool)
+	novelService := service.NewNovelService(novelRepository, eventHub)
+
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
 		userRepository, filepath.Join(configuration.UploadsDirectory, "avatars"))
+	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
 
 	mux := http.NewServeMux()
 
@@ -77,6 +81,18 @@ func main() {
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
 		http.FileServer(http.Dir(configuration.UploadsDirectory))))
+
+	// Admin: novels (JWT + admin role)
+	requireAdmin := func(handlerFunc http.HandlerFunc) http.Handler {
+		return middleware.Authenticate(configuration.JWTSecret,
+			middleware.RequireAdmin(handlerFunc))
+	}
+	mux.Handle("GET /api/v1/admin/novels", requireAdmin(adminNovelHandler.List))
+	mux.Handle("POST /api/v1/admin/novels", requireAdmin(adminNovelHandler.Create))
+	mux.Handle("GET /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Get))
+	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
+	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))
+	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
 
 	// Realtime events (JWT via ?token= — browsers can't set WS headers)
 	mux.Handle("GET /ws", realtime.NewWSHandler(eventHub, configuration.JWTSecret))

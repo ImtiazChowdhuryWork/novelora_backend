@@ -174,6 +174,8 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 	case errors.Is(err, repository.ErrEmailTaken),
 		errors.Is(err, repository.ErrUsernameTaken):
 		writeError(responseWriter, http.StatusConflict, err.Error())
+	case errors.Is(err, repository.ErrNovelNotFound):
+		writeError(responseWriter, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials),
 		errors.Is(err, service.ErrInvalidRefreshToken),
 		errors.Is(err, service.ErrInvalidGoogleToken):
