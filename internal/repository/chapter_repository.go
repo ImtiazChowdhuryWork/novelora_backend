@@ -95,6 +95,31 @@ func (repository *ChapterRepository) GetByID(ctx context.Context, chapterID stri
 	return chapter, nil
 }
 
+// Create appends a single draft chapter, numbering after the novel's
+// current maximum, and returns the inserted row.
+func (repository *ChapterRepository) Create(ctx context.Context, novelID string, write ChapterWrite) (*Chapter, error) {
+	chapter := &Chapter{}
+	err := repository.pool.QueryRow(ctx, `
+		WITH next_number AS (
+			SELECT coalesce(max(number), 0) + 1 AS number
+			FROM chapters WHERE novel_id = $1
+		)
+		INSERT INTO chapters (novel_id, number, title, content_json, content_text, word_count)
+		SELECT $1, next_number.number, $2, $3, $4, $5 FROM next_number
+		RETURNING id, novel_id, number, title, content_json, content_text, word_count,
+		          status, published_at, created_at, updated_at`,
+		novelID, write.Title, write.ContentJSON, write.ContentText, write.WordCount,
+	).Scan(
+		&chapter.ID, &chapter.NovelID, &chapter.Number, &chapter.Title,
+		&chapter.ContentJSON, &chapter.ContentText, &chapter.WordCount,
+		&chapter.Status, &chapter.PublishedAt, &chapter.CreatedAt, &chapter.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert chapter: %w", err)
+	}
+	return chapter, nil
+}
+
 // CreateBatch appends chapters as drafts, numbering after the novel's
 // current maximum — all inside one transaction (an import is atomic).
 func (repository *ChapterRepository) CreateBatch(ctx context.Context, novelID string, writes []ChapterWrite) (int, error) {

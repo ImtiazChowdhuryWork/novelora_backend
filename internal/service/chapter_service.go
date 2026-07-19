@@ -84,15 +84,34 @@ func (chapterService *ChapterService) Import(ctx context.Context, novelID string
 	if err != nil {
 		return 0, err
 	}
-	chapterService.events.Publish(realtime.Event{Topic: "chapter.updated", ID: novelID})
-	chapterService.events.Publish(realtime.Event{Topic: "novel.updated", ID: novelID})
+	chapterService.publishChapterChangedEvents(novelID, "chapter.updated")
 	return created, nil
 }
 
-// CreateOne appends a single draft chapter (manual authoring).
-func (chapterService *ChapterService) CreateOne(ctx context.Context, novelID string, write repository.ChapterWrite) error {
-	_, err := chapterService.Import(ctx, novelID, []repository.ChapterWrite{write})
-	return err
+// CreateOne appends a single draft chapter (manual authoring) and
+// returns it, so the caller can respond with the real created resource.
+func (chapterService *ChapterService) CreateOne(ctx context.Context, novelID string, write repository.ChapterWrite) (*repository.Chapter, error) {
+	if _, err := chapterService.novels.GetByID(ctx, novelID); err != nil {
+		return nil, err
+	}
+	if err := validateChapterWrite(&write); err != nil {
+		return nil, err
+	}
+
+	chapter, err := chapterService.chapters.Create(ctx, novelID, write)
+	if err != nil {
+		return nil, err
+	}
+	chapterService.publishChapterChangedEvents(novelID, "chapter.updated")
+	return chapter, nil
+}
+
+// publishChapterChangedEvents is the shared notification for anything
+// that adds/edits chapters: the chapter list and the novel's chapter
+// counts both need to refresh.
+func (chapterService *ChapterService) publishChapterChangedEvents(novelID, chapterTopic string) {
+	chapterService.events.Publish(realtime.Event{Topic: chapterTopic, ID: novelID})
+	chapterService.events.Publish(realtime.Event{Topic: "novel.updated", ID: novelID})
 }
 
 func (chapterService *ChapterService) Update(ctx context.Context, chapterID string, write repository.ChapterWrite) (*repository.Chapter, error) {
@@ -115,12 +134,11 @@ func (chapterService *ChapterService) UpdateStatus(ctx context.Context, chapterI
 	if err != nil {
 		return nil, err
 	}
-	topic := "chapter.updated"
+	chapterTopic := "chapter.updated"
 	if status == "published" {
-		topic = "chapter.published"
+		chapterTopic = "chapter.published"
 	}
-	chapterService.events.Publish(realtime.Event{Topic: topic, ID: chapter.NovelID})
-	chapterService.events.Publish(realtime.Event{Topic: "novel.updated", ID: chapter.NovelID})
+	chapterService.publishChapterChangedEvents(chapter.NovelID, chapterTopic)
 	return chapter, nil
 }
 
@@ -132,8 +150,7 @@ func (chapterService *ChapterService) Delete(ctx context.Context, chapterID stri
 	if err := chapterService.chapters.Delete(ctx, chapterID); err != nil {
 		return err
 	}
-	chapterService.events.Publish(realtime.Event{Topic: "chapter.updated", ID: chapter.NovelID})
-	chapterService.events.Publish(realtime.Event{Topic: "novel.updated", ID: chapter.NovelID})
+	chapterService.publishChapterChangedEvents(chapter.NovelID, "chapter.updated")
 	return nil
 }
 

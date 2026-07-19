@@ -89,13 +89,13 @@ func (adminChapterHandler *AdminChapterHandler) Create(responseWriter http.Respo
 	if !decodeJSON(responseWriter, request, &writeRequest) {
 		return
 	}
-	err := adminChapterHandler.chapterService.CreateOne(
+	chapter, err := adminChapterHandler.chapterService.CreateOne(
 		request.Context(), request.PathValue("id"), writeRequest.toWrite())
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
-	responseWriter.WriteHeader(http.StatusCreated)
+	writeJSON(responseWriter, http.StatusCreated, newChapterResponse(chapter))
 }
 
 type importChaptersRequest struct {
