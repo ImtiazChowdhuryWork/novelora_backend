@@ -35,11 +35,31 @@ func (chapterService *ChapterService) ListByNovel(ctx context.Context, novelID s
 	if _, err := chapterService.novels.GetByID(ctx, novelID); err != nil {
 		return nil, err
 	}
-	return chapterService.chapters.ListByNovel(ctx, novelID)
+	return chapterService.chapters.ListByNovel(ctx, novelID, false)
+}
+
+// ListPublishedByNovel is the reader-facing listing: drafts never leak.
+func (chapterService *ChapterService) ListPublishedByNovel(ctx context.Context, novelID string) ([]*repository.Chapter, error) {
+	if _, err := chapterService.novels.GetByID(ctx, novelID); err != nil {
+		return nil, err
+	}
+	return chapterService.chapters.ListByNovel(ctx, novelID, true)
 }
 
 func (chapterService *ChapterService) Get(ctx context.Context, chapterID string) (*repository.Chapter, error) {
 	return chapterService.chapters.GetByID(ctx, chapterID)
+}
+
+// GetPublished is the reader-facing fetch: draft chapters 404.
+func (chapterService *ChapterService) GetPublished(ctx context.Context, chapterID string) (*repository.Chapter, error) {
+	chapter, err := chapterService.chapters.GetByID(ctx, chapterID)
+	if err != nil {
+		return nil, err
+	}
+	if chapter.Status != "published" {
+		return nil, repository.ErrChapterNotFound
+	}
+	return chapter, nil
 }
 
 // Import appends a batch of draft chapters to a novel (the commit step

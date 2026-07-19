@@ -33,10 +33,12 @@ type Novel struct {
 
 // NovelListFilter narrows and pages the novels list.
 type NovelListFilter struct {
-	Search   string
-	Status   string // "", "ongoing", "completed"
-	Page     int    // 1-based
-	PageSize int
+	Search        string
+	Status        string // "", "ongoing", "completed"
+	IsShort       *bool  // nil = both
+	IsRecommended *bool  // nil = both
+	Page          int    // 1-based
+	PageSize      int
 }
 
 // NovelWrite is the mutable subset used by Create and Update.
@@ -89,6 +91,14 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 	if filter.Status != "" {
 		arguments = append(arguments, filter.Status)
 		conditions = append(conditions, fmt.Sprintf("n.status = $%d", len(arguments)))
+	}
+	if filter.IsShort != nil {
+		arguments = append(arguments, *filter.IsShort)
+		conditions = append(conditions, fmt.Sprintf("n.is_short = $%d", len(arguments)))
+	}
+	if filter.IsRecommended != nil {
+		arguments = append(arguments, *filter.IsRecommended)
+		conditions = append(conditions, fmt.Sprintf("n.is_recommended = $%d", len(arguments)))
 	}
 	whereClause := strings.Join(conditions, " AND ")
 

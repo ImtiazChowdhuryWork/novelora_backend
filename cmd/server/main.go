@@ -60,6 +60,7 @@ func main() {
 		userRepository, filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
+	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
 
 	mux := http.NewServeMux()
 
@@ -84,6 +85,12 @@ func main() {
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
 		http.FileServer(http.Dir(configuration.UploadsDirectory))))
+
+	// Public catalog (reader-facing; published content only)
+	mux.HandleFunc("GET /api/v1/novels", publicNovelHandler.List)
+	mux.HandleFunc("GET /api/v1/novels/{id}", publicNovelHandler.Get)
+	mux.HandleFunc("GET /api/v1/novels/{id}/chapters", publicNovelHandler.Chapters)
+	mux.HandleFunc("GET /api/v1/chapters/{id}", publicNovelHandler.Chapter)
 
 	// Admin: novels (JWT + admin role)
 	requireAdmin := func(handlerFunc http.HandlerFunc) http.Handler {

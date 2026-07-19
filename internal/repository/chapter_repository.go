@@ -45,11 +45,16 @@ func NewChapterRepository(pool *pgxpool.Pool) *ChapterRepository {
 }
 
 // ListByNovel returns chapters without their content — list payloads
-// stay lean; content is fetched per chapter.
-func (repository *ChapterRepository) ListByNovel(ctx context.Context, novelID string) ([]*Chapter, error) {
+// stay lean; content is fetched per chapter. onlyPublished narrows to
+// what readers may see.
+func (repository *ChapterRepository) ListByNovel(ctx context.Context, novelID string, onlyPublished bool) ([]*Chapter, error) {
+	statusCondition := ""
+	if onlyPublished {
+		statusCondition = " AND status = 'published'"
+	}
 	rows, err := repository.pool.Query(ctx, `
 		SELECT id, novel_id, number, title, word_count, status, published_at, created_at, updated_at
-		FROM chapters WHERE novel_id = $1 ORDER BY number`, novelID)
+		FROM chapters WHERE novel_id = $1`+statusCondition+` ORDER BY number`, novelID)
 	if err != nil {
 		return nil, fmt.Errorf("list chapters: %w", err)
 	}
