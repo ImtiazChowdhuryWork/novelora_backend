@@ -74,7 +74,7 @@ func main() {
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
-		userRepository, deviceTokenRepository,
+		userRepository, deviceTokenRepository, configuration.JWTSecret,
 		filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService)
@@ -97,10 +97,10 @@ func main() {
 		configuration.JWTSecret, http.HandlerFunc(userHandler.CurrentUser)))
 	mux.Handle("PUT /api/v1/users/me/avatar", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.UpdateAvatar)))
-	mux.Handle("PUT /api/v1/users/me/device-token", middleware.Authenticate(
-		configuration.JWTSecret, http.HandlerFunc(userHandler.RegisterDeviceToken)))
 	mux.Handle("DELETE /api/v1/users/me/avatar", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.RemoveAvatar)))
+	// Deliberately public: see RegisterDeviceToken's doc comment
+	mux.HandleFunc("PUT /api/v1/users/me/device-token", userHandler.RegisterDeviceToken)
 
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",

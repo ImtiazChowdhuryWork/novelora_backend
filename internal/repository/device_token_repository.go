@@ -18,7 +18,9 @@ func NewDeviceTokenRepository(pool *pgxpool.Pool) *DeviceTokenRepository {
 // Upsert registers or re-associates a device token. Tokens are unique
 // per device (Firebase reissues a new one on reinstall/logout), so a
 // re-registration under a different account simply reassigns it.
-func (repository *DeviceTokenRepository) Upsert(ctx context.Context, userID, token, platform string) error {
+// userID is nil for anonymous devices — registration never requires
+// login, since notifications currently broadcast to everyone anyway.
+func (repository *DeviceTokenRepository) Upsert(ctx context.Context, userID *string, token, platform string) error {
 	_, err := repository.pool.Exec(ctx, `
 		INSERT INTO device_tokens (user_id, token, platform)
 		VALUES ($1, $2, $3)
