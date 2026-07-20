@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -17,6 +18,9 @@ var (
 type Genre struct {
 	ID   string
 	Name string
+	// Kind is "genre" (a broad category like Romance or Mafia) or "tag"
+	// (a trope within one, like Alpha or Revenge) — see migration 0015.
+	Kind string
 }
 
 type GenreRepository struct {
@@ -28,7 +32,7 @@ func NewGenreRepository(pool *pgxpool.Pool) *GenreRepository {
 }
 
 func (repository *GenreRepository) List(ctx context.Context) ([]*Genre, error) {
-	rows, err := repository.pool.Query(ctx, "SELECT id, name FROM genres ORDER BY name")
+	rows, err := repository.pool.Query(ctx, "SELECT id, name, kind FROM genres ORDER BY kind, name")
 	if err != nil {
 		return nil, fmt.Errorf("list genres: %w", err)
 	}
@@ -37,7 +41,7 @@ func (repository *GenreRepository) List(ctx context.Context) ([]*Genre, error) {
 	genres := []*Genre{}
 	for rows.Next() {
 		genre := &Genre{}
-		if err := rows.Scan(&genre.ID, &genre.Name); err != nil {
+		if err := rows.Scan(&genre.ID, &genre.Name, &genre.Kind); err != nil {
 			return nil, fmt.Errorf("scan genre: %w", err)
 		}
 		genres = append(genres, genre)
@@ -45,17 +49,41 @@ func (repository *GenreRepository) List(ctx context.Context) ([]*Genre, error) {
 	return genres, rows.Err()
 }
 
-func (repository *GenreRepository) Create(ctx context.Context, name string) (*Genre, error) {
+// Create inserts a genre or tag; kind must already be validated by the
+// caller ("genre" or "tag" — the DB CHECK constraint is the backstop).
+func (repository *GenreRepository) Create(ctx context.Context, name, kind string) (*Genre, error) {
 	genre := &Genre{}
 	err := repository.pool.QueryRow(ctx,
-		"INSERT INTO genres (name) VALUES ($1) RETURNING id, name", name,
-	).Scan(&genre.ID, &genre.Name)
+		"INSERT INTO genres (name, kind) VALUES ($1, $2) RETURNING id, name, kind", name, kind,
+	).Scan(&genre.ID, &genre.Name, &genre.Kind)
 	if err != nil {
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) && postgresError.Code == pgerrcodeUniqueViolation {
 			return nil, ErrGenreNameTaken
 		}
 		return nil, fmt.Errorf("insert genre: %w", err)
+	}
+	return genre, nil
+}
+
+// Update renames a genre/tag and/or reclassifies its kind in place —
+// unlike delete-then-recreate, this keeps its id, so every novel
+// already assigned to it stays assigned.
+func (repository *GenreRepository) Update(ctx context.Context, genreID, name, kind string) (*Genre, error) {
+	genre := &Genre{}
+	err := repository.pool.QueryRow(ctx,
+		"UPDATE genres SET name = $1, kind = $2 WHERE id = $3 RETURNING id, name, kind",
+		name, kind, genreID,
+	).Scan(&genre.ID, &genre.Name, &genre.Kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrGenreNotFound
+	}
+	if err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.Code == pgerrcodeUniqueViolation {
+			return nil, ErrGenreNameTaken
+		}
+		return nil, fmt.Errorf("update genre: %w", err)
 	}
 	return genre, nil
 }
@@ -89,7 +117,7 @@ func (repository *GenreRepository) ListForNovels(ctx context.Context, novelIDs [
 	}
 
 	rows, err := repository.pool.Query(ctx, `
-		SELECT ng.novel_id, g.id, g.name
+		SELECT ng.novel_id, g.id, g.name, g.kind
 		FROM novel_genres ng
 		JOIN genres g ON g.id = ng.genre_id
 		WHERE ng.novel_id = ANY($1)
@@ -102,7 +130,7 @@ func (repository *GenreRepository) ListForNovels(ctx context.Context, novelIDs [
 	for rows.Next() {
 		var novelID string
 		genre := &Genre{}
-		if err := rows.Scan(&novelID, &genre.ID, &genre.Name); err != nil {
+		if err := rows.Scan(&novelID, &genre.ID, &genre.Name, &genre.Kind); err != nil {
 			return nil, fmt.Errorf("scan novel genre: %w", err)
 		}
 		result[novelID] = append(result[novelID], genre)

@@ -151,6 +151,7 @@ func main() {
 	// Admin: genres
 	mux.Handle("GET /api/v1/admin/genres", requireAdmin(genreHandler.List))
 	mux.Handle("POST /api/v1/admin/genres", requireAdmin(genreHandler.Create))
+	mux.Handle("PUT /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Delete))
 
 	// Admin: users

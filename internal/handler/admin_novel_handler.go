@@ -53,6 +53,7 @@ func (writeRequest novelWriteRequest) toWrite() repository.NovelWrite {
 type genreResponse struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	Kind string `json:"kind"`
 }
 
 type novelResponse struct {
