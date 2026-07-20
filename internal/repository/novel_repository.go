@@ -43,8 +43,11 @@ type NovelListFilter struct {
 	Status        string // "", "ongoing", "completed"
 	IsShort       *bool  // nil = both
 	IsRecommended *bool  // nil = both
-	Page          int    // 1-based
-	PageSize      int
+	GenreID       string // "" = any genre/tag
+	// Sort: "" (manual order), "views", "rating", "new"
+	Sort     string
+	Page     int // 1-based
+	PageSize int
 }
 
 // NovelWrite is the mutable subset used by Create and Update.
@@ -106,20 +109,35 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 		arguments = append(arguments, *filter.IsRecommended)
 		conditions = append(conditions, fmt.Sprintf("n.is_recommended = $%d", len(arguments)))
 	}
+	joinClause := ""
+	if filter.GenreID != "" {
+		arguments = append(arguments, filter.GenreID)
+		joinClause = fmt.Sprintf("JOIN novel_genres ng ON ng.novel_id = n.id AND ng.genre_id = $%d", len(arguments))
+	}
 	whereClause := strings.Join(conditions, " AND ")
 
 	var total int
 	err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novels n WHERE "+whereClause, arguments...,
+		fmt.Sprintf("SELECT count(*) FROM novels n %s WHERE %s", joinClause, whereClause), arguments...,
 	).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("count novels: %w", err)
 	}
 
+	orderClause := "n.sort_order ASC, n.created_at DESC"
+	switch filter.Sort {
+	case "views":
+		orderClause = "n.view_count DESC, n.created_at DESC"
+	case "rating":
+		orderClause = "n.rating DESC NULLS LAST, n.view_count DESC"
+	case "new":
+		orderClause = "n.created_at DESC"
+	}
+
 	arguments = append(arguments, filter.PageSize, (filter.Page-1)*filter.PageSize)
 	rows, err := repository.pool.Query(ctx, fmt.Sprintf(
-		"SELECT %s FROM novels n WHERE %s ORDER BY n.sort_order ASC, n.created_at DESC LIMIT $%d OFFSET $%d",
-		novelColumns, whereClause, len(arguments)-1, len(arguments)), arguments...)
+		"SELECT %s FROM novels n %s WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d",
+		novelColumns, joinClause, whereClause, orderClause, len(arguments)-1, len(arguments)), arguments...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list novels: %w", err)
 	}

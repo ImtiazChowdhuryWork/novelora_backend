@@ -43,6 +43,8 @@ func (publicNovelHandler *PublicNovelHandler) List(responseWriter http.ResponseW
 		Status:        query.Get("status"),
 		IsShort:       parseOptionalBool(query.Get("is_short")),
 		IsRecommended: parseOptionalBool(query.Get("recommended")),
+		GenreID:       query.Get("genre_id"),
+		Sort:          query.Get("sort"),
 		Page:          page,
 		PageSize:      pageSize,
 	}
