@@ -23,6 +23,7 @@ var (
 	ErrInvalidRefreshToken      = errors.New("refresh token is invalid or expired")
 	ErrInvalidGoogleToken       = errors.New("google sign-in token is invalid")
 	ErrGoogleLoginNotConfigured = errors.New("google sign-in is not configured on this server")
+	ErrAccountBanned            = errors.New("this account has been suspended")
 )
 
 // ValidationError reports invalid user input; handlers map it to 400.
@@ -265,7 +266,14 @@ func (authService *AuthService) Logout(ctx context.Context, refreshToken string)
 	return authService.refreshTokens.Revoke(ctx, hashRefreshToken(refreshToken))
 }
 
+// issueTokens is the single choke point every sign-in path (register,
+// login, Google, refresh) funnels through, so the ban check only needs
+// to live here — a freshly registered user is never banned, so the
+// check is a no-op on that path.
 func (authService *AuthService) issueTokens(ctx context.Context, user *repository.User) (*AuthResult, error) {
+	if user.IsBanned {
+		return nil, ErrAccountBanned
+	}
 	now := time.Now()
 
 	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{

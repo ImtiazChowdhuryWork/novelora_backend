@@ -16,31 +16,52 @@ const (
 
 type NovelService struct {
 	novels *repository.NovelRepository
+	genres *repository.GenreRepository
 	events realtime.Publisher
 }
 
-func NewNovelService(novels *repository.NovelRepository, events realtime.Publisher) *NovelService {
-	return &NovelService{novels: novels, events: events}
+func NewNovelService(novels *repository.NovelRepository, genres *repository.GenreRepository, events realtime.Publisher) *NovelService {
+	return &NovelService{novels: novels, genres: genres, events: events}
 }
 
 func (novelService *NovelService) List(ctx context.Context, filter repository.NovelListFilter) ([]*repository.Novel, int, error) {
 	if filter.Page < 1 {
 		filter.Page = 1
 	}
-	if filter.PageSize < 1 || filter.PageSize > 100 {
+	switch {
+	case filter.PageSize < 1:
 		filter.PageSize = 20
+	case filter.PageSize > 500:
+		// Clamp down rather than resetting to the default — the admin
+		// dashboard's drag-to-reorder view asks for a large page size on
+		// purpose (it needs the whole catalog loaded, not just page 1).
+		filter.PageSize = 500
 	}
 	if filter.Status != "" && filter.Status != "ongoing" && filter.Status != "completed" {
 		return nil, 0, &ValidationError{Message: "status must be 'ongoing' or 'completed'"}
 	}
-	return novelService.novels.List(ctx, filter)
+	novels, total, err := novelService.novels.List(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := novelService.attachGenres(ctx, novels); err != nil {
+		return nil, 0, err
+	}
+	return novels, total, nil
 }
 
 func (novelService *NovelService) Get(ctx context.Context, novelID string) (*repository.Novel, error) {
-	return novelService.novels.GetByID(ctx, novelID)
+	novel, err := novelService.novels.GetByID(ctx, novelID)
+	if err != nil {
+		return nil, err
+	}
+	if err := novelService.attachGenres(ctx, []*repository.Novel{novel}); err != nil {
+		return nil, err
+	}
+	return novel, nil
 }
 
-func (novelService *NovelService) Create(ctx context.Context, write repository.NovelWrite) (*repository.Novel, error) {
+func (novelService *NovelService) Create(ctx context.Context, write repository.NovelWrite, genreIDs []string) (*repository.Novel, error) {
 	if err := validateNovelWrite(&write); err != nil {
 		return nil, err
 	}
@@ -48,11 +69,18 @@ func (novelService *NovelService) Create(ctx context.Context, write repository.N
 	if err != nil {
 		return nil, err
 	}
+	if err := novelService.genres.SetForNovel(ctx, novel.ID, genreIDs); err != nil {
+		return nil, err
+	}
+	novel.Genres, err = novelService.genres.ListForNovel(ctx, novel.ID)
+	if err != nil {
+		return nil, err
+	}
 	novelService.events.Publish(realtime.Event{Topic: "novel.created", ID: novel.ID})
 	return novel, nil
 }
 
-func (novelService *NovelService) Update(ctx context.Context, novelID string, write repository.NovelWrite) (*repository.Novel, error) {
+func (novelService *NovelService) Update(ctx context.Context, novelID string, write repository.NovelWrite, genreIDs []string) (*repository.Novel, error) {
 	if err := validateNovelWrite(&write); err != nil {
 		return nil, err
 	}
@@ -60,8 +88,31 @@ func (novelService *NovelService) Update(ctx context.Context, novelID string, wr
 	if err != nil {
 		return nil, err
 	}
+	if err := novelService.genres.SetForNovel(ctx, novel.ID, genreIDs); err != nil {
+		return nil, err
+	}
+	novel.Genres, err = novelService.genres.ListForNovel(ctx, novel.ID)
+	if err != nil {
+		return nil, err
+	}
 	novelService.events.Publish(realtime.Event{Topic: "novel.updated", ID: novel.ID})
 	return novel, nil
+}
+
+// attachGenres populates Genres on every novel in one batched query.
+func (novelService *NovelService) attachGenres(ctx context.Context, novels []*repository.Novel) error {
+	novelIDs := make([]string, len(novels))
+	for index, novel := range novels {
+		novelIDs[index] = novel.ID
+	}
+	byNovel, err := novelService.genres.ListForNovels(ctx, novelIDs)
+	if err != nil {
+		return err
+	}
+	for _, novel := range novels {
+		novel.Genres = byNovel[novel.ID]
+	}
+	return nil
 }
 
 func (novelService *NovelService) UpdateCover(ctx context.Context, novelID, coverURL string) error {
@@ -69,6 +120,20 @@ func (novelService *NovelService) UpdateCover(ctx context.Context, novelID, cove
 		return err
 	}
 	novelService.events.Publish(realtime.Event{Topic: "novel.updated", ID: novelID})
+	return nil
+}
+
+// Reorder sets each given novel's sort_order exactly as provided —
+// see NovelRepository.Reorder for why positions are absolute rather
+// than array indices.
+func (novelService *NovelService) Reorder(ctx context.Context, positions []repository.NovelPosition) error {
+	if len(positions) == 0 {
+		return &ValidationError{Message: "positions is required"}
+	}
+	if err := novelService.novels.Reorder(ctx, positions); err != nil {
+		return err
+	}
+	novelService.events.Publish(realtime.Event{Topic: "novel.updated"})
 	return nil
 }
 

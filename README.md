@@ -56,8 +56,11 @@ If the local Postgres Windows service can't start without admin rights, run it d
 | POST   | `/api/v1/auth/refresh`  | ✅     | `{refresh_token}` → 200, rotates the token   |
 | POST   | `/api/v1/auth/logout`   | ✅     | `{refresh_token}` → 204, revokes the token   |
 | GET    | `/api/v1/users/me`      | ✅     | Bearer JWT → 200 current user (401 otherwise)|
+| PUT    | `/api/v1/users/me/device-token` | ✅ | `{token, platform}` → 204; registers an FCM token for push |
 | GET    | `/ws`                   | ✅     | Realtime events; JWT via `?token=` (WS upgrade)|
 | *      | `/api/v1/admin/novels…` | ✅     | Admin-only novels CRUD + cover upload (list/create/get/update/soft-delete) |
+| *      | `/api/v1/admin/novels/{id}/chapters…` | ✅ | Admin-only chapter create/import/list; `/admin/chapters/{id}` get/update/status/delete |
+| GET    | `/api/v1/novels…`, `/api/v1/chapters/{id}` | ✅ | Public catalog — published content only |
 
 Success responses: `{user: {id, username, email, created_at}, access_token, refresh_token, expires_in}`.
 Errors: `{"error": "message"}` with 400 (validation/bad JSON), 401 (bad credentials / bad refresh token), 409 (email/username taken).
@@ -69,6 +72,15 @@ Paths mirror `ApiEndpoints` in the Flutter app (`lib/core/network/api_endpoints.
 - Access token: HS256 JWT (`sub` = user id), 15-minute TTL.
 - Refresh token: opaque 32-byte random hex, 30-day TTL, stored as SHA-256 hash; rotated on every refresh and revoked on logout (reuse of an old token returns 401).
 - Validation limits mirror the app's `AppConstants` (username 3–50, password 8–128).
+
+## Push Notifications
+
+Chapter publishes broadcast to every registered device token (no per-novel
+"following" yet — see `internal/push`). Disabled gracefully until configured:
+
+1. Firebase Console → Project Settings → Service Accounts → Generate new private key
+2. Save the JSON file somewhere outside the repo and set `FIREBASE_CREDENTIALS_JSON=<path>` in `.env`
+3. Restart the server — logs `push: FCM notifications enabled` instead of the no-op message
 
 ## Conventions
 

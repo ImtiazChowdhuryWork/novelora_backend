@@ -17,10 +17,16 @@ const UserIDContextKey contextKey = "userID"
 // UserRoleContextKey holds the authenticated user's role in the request context.
 const UserRoleContextKey contextKey = "userRole"
 
+// UserNameContextKey holds the authenticated user's username in the
+// request context — mainly for audit logging, so it doesn't need a
+// separate DB lookup per action.
+const UserNameContextKey contextKey = "userName"
+
 // AccessTokenClaims is what a validated access token asserts.
 type AccessTokenClaims struct {
 	UserID string
 	Role   string
+	Name   string
 }
 
 // ValidateAccessToken verifies an HS256 access token and returns its
@@ -42,11 +48,13 @@ func ValidateAccessToken(jwtSecret []byte, tokenString string) (*AccessTokenClai
 	}
 
 	role := ""
+	name := ""
 	if mapClaims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
 		role, _ = mapClaims["role"].(string)
+		name, _ = mapClaims["name"].(string)
 	}
 
-	return &AccessTokenClaims{UserID: subject, Role: role}, nil
+	return &AccessTokenClaims{UserID: subject, Role: role, Name: name}, nil
 }
 
 // Authenticate validates the Bearer access token and stores the user id
@@ -68,6 +76,7 @@ func Authenticate(jwtSecret []byte, next http.Handler) http.Handler {
 
 		requestContext := context.WithValue(request.Context(), UserIDContextKey, claims.UserID)
 		requestContext = context.WithValue(requestContext, UserRoleContextKey, claims.Role)
+		requestContext = context.WithValue(requestContext, UserNameContextKey, claims.Name)
 		next.ServeHTTP(responseWriter, request.WithContext(requestContext))
 	})
 }

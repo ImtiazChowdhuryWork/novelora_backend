@@ -166,10 +166,13 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 	case errors.As(err, &validationError):
 		writeError(responseWriter, http.StatusBadRequest, validationError.Message)
 	case errors.Is(err, repository.ErrEmailTaken),
-		errors.Is(err, repository.ErrUsernameTaken):
+		errors.Is(err, repository.ErrUsernameTaken),
+		errors.Is(err, repository.ErrGenreNameTaken):
 		writeError(responseWriter, http.StatusConflict, err.Error())
 	case errors.Is(err, repository.ErrNovelNotFound),
-		errors.Is(err, repository.ErrChapterNotFound):
+		errors.Is(err, repository.ErrChapterNotFound),
+		errors.Is(err, repository.ErrNotificationNotFound),
+		errors.Is(err, repository.ErrGenreNotFound):
 		writeError(responseWriter, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials),
 		errors.Is(err, service.ErrInvalidRefreshToken),
@@ -177,6 +180,8 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 		writeError(responseWriter, http.StatusUnauthorized, err.Error())
 	case errors.Is(err, service.ErrGoogleLoginNotConfigured):
 		writeError(responseWriter, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, service.ErrAccountBanned):
+		writeError(responseWriter, http.StatusForbidden, err.Error())
 	default:
 		log.Printf("internal error: %v", err)
 		writeError(responseWriter, http.StatusInternalServerError, "internal server error")
