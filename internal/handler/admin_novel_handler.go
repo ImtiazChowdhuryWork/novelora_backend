@@ -78,7 +78,7 @@ type novelResponse struct {
 func newNovelResponse(novel *repository.Novel) novelResponse {
 	genres := make([]genreResponse, 0, len(novel.Genres))
 	for _, genre := range novel.Genres {
-		genres = append(genres, genreResponse{ID: genre.ID, Name: genre.Name})
+		genres = append(genres, genreResponse{ID: genre.ID, Name: genre.Name, Kind: genre.Kind})
 	}
 	return novelResponse{
 		ID:                novel.ID,
