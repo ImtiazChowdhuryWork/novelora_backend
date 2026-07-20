@@ -78,30 +78,65 @@ func (chapterService *ChapterService) GetPublished(ctx context.Context, chapterI
 	return chapter, nil
 }
 
-// Import appends a batch of draft chapters to a novel (the commit step
-// of the dashboard's import pipeline).
-func (chapterService *ChapterService) Import(ctx context.Context, novelID string, writes []repository.ChapterWrite) (int, error) {
+// Import commits the dashboard's import pipeline: any incoming chapter
+// whose title matches one this novel already has REPLACES that
+// chapter's content in place (status untouched — a published chapter
+// stays published); everything else is appended as a new draft.
+// Without this, re-running an import (the same PDF, or a corrected
+// extraction of it) just piled up duplicate chapters forever.
+func (chapterService *ChapterService) Import(ctx context.Context, novelID string, writes []repository.ChapterWrite) (created, updated int, err error) {
 	if _, err := chapterService.novels.GetByID(ctx, novelID); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if len(writes) == 0 {
-		return 0, &ValidationError{Message: "no chapters to import"}
+		return 0, 0, &ValidationError{Message: "no chapters to import"}
 	}
 	if len(writes) > maxImportBatchSize {
-		return 0, &ValidationError{Message: fmt.Sprintf("too many chapters in one import (max %d)", maxImportBatchSize)}
+		return 0, 0, &ValidationError{Message: fmt.Sprintf("too many chapters in one import (max %d)", maxImportBatchSize)}
 	}
 	for index := range writes {
 		if err := validateChapterWrite(&writes[index]); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 
-	created, err := chapterService.chapters.CreateBatch(ctx, novelID, writes)
+	existing, err := chapterService.chapters.ListByNovel(ctx, novelID, false)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
+	existingByTitle := make(map[string]*repository.Chapter, len(existing))
+	for _, chapter := range existing {
+		existingByTitle[normalizeChapterTitle(chapter.Title)] = chapter
+	}
+
+	toCreate := make([]repository.ChapterWrite, 0, len(writes))
+	for _, write := range writes {
+		match, isReplace := existingByTitle[normalizeChapterTitle(write.Title)]
+		if !isReplace {
+			toCreate = append(toCreate, write)
+			continue
+		}
+		if _, err := chapterService.chapters.Update(ctx, match.ID, write); err != nil {
+			return created, updated, err
+		}
+		updated++
+	}
+
+	if len(toCreate) > 0 {
+		created, err = chapterService.chapters.CreateBatch(ctx, novelID, toCreate)
+		if err != nil {
+			return created, updated, err
+		}
+	}
+
 	chapterService.publishChapterChangedEvents(novelID, "chapter.updated")
-	return created, nil
+	return created, updated, nil
+}
+
+// normalizeChapterTitle makes import-time title matching tolerant of
+// whitespace/casing differences a re-extraction might introduce.
+func normalizeChapterTitle(title string) string {
+	return strings.ToLower(strings.Join(strings.Fields(title), " "))
 }
 
 // CreateOne appends a single draft chapter (manual authoring) and

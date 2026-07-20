@@ -106,7 +106,9 @@ type importChaptersRequest struct {
 	Chapters []chapterWriteRequest `json:"chapters"`
 }
 
-// Import: POST /admin/novels/{id}/chapters/import — batch of drafts.
+// Import: POST /admin/novels/{id}/chapters/import — chapters whose
+// title matches an existing one replace its content; the rest are
+// appended as new drafts. See ChapterService.Import.
 func (adminChapterHandler *AdminChapterHandler) Import(responseWriter http.ResponseWriter, request *http.Request) {
 	var importRequest importChaptersRequest
 	if !decodeLargeJSON(responseWriter, request, &importRequest) {
@@ -117,13 +119,17 @@ func (adminChapterHandler *AdminChapterHandler) Import(responseWriter http.Respo
 		writes = append(writes, chapterRequest.toWrite())
 	}
 
-	created, err := adminChapterHandler.chapterService.Import(
-		request.Context(), request.PathValue("id"), writes)
+	novelID := request.PathValue("id")
+	created, updated, err := adminChapterHandler.chapterService.Import(
+		request.Context(), novelID, writes)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
-	writeJSON(responseWriter, http.StatusCreated, map[string]any{"created": created})
+	actorID, actorName := actorFromContext(request.Context())
+	adminChapterHandler.auditLogger.Log(actorID, actorName, "chapter.imported", "novel", novelID,
+		map[string]any{"created": created, "updated": updated})
+	writeJSON(responseWriter, http.StatusCreated, map[string]any{"created": created, "updated": updated})
 }
 
 // Get: GET /admin/chapters/{id} — full content.
