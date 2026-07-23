@@ -54,10 +54,10 @@ func main() {
 	)
 	novelRepository := repository.NewNovelRepository(pool)
 	genreRepository := repository.NewGenreRepository(pool)
-	novelService := service.NewNovelService(novelRepository, genreRepository, eventHub)
 	chapterRepository := repository.NewChapterRepository(pool)
 	deviceTokenRepository := repository.NewDeviceTokenRepository(pool)
 	notificationRepository := repository.NewNotificationRepository(pool)
+	sectionMembershipRepository := repository.NewSectionMembershipRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
 	auditLogger := audit.NewLogger(auditLogRepository)
 
@@ -74,9 +74,16 @@ func main() {
 		log.Println("push: FIREBASE_CREDENTIALS_JSON not set, notifications disabled")
 	}
 
+	novelService := service.NewNovelService(
+		novelRepository, genreRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	chapterService := service.NewChapterService(
 		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	go runScheduledPublishTicker(chapterService)
+
+	rankingNotificationService := service.NewRankingNotificationService(
+		novelRepository, genreRepository, sectionMembershipRepository,
+		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
+	go runRankingDetectionTicker(rankingNotificationService)
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
@@ -209,5 +216,20 @@ func runScheduledPublishTicker(chapterService *service.ChapterService) {
 		} else if published > 0 {
 			log.Printf("schedule: auto-published %d chapter(s)", published)
 		}
+	}
+}
+
+// runRankingDetectionTicker periodically checks whether any novel has
+// newly entered a tracked ranked section (Trending, a category's own
+// Most Read, ...) and notifies readers about it. 45 minutes is frequent
+// enough to feel timely without a novel hovering right at the ranking
+// boundary flapping in and out and re-notifying every cycle.
+func runRankingDetectionTicker(rankingService *service.RankingNotificationService) {
+	ticker := time.NewTicker(45 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rankingService.DetectAndNotify(ctx)
+		cancel()
 	}
 }

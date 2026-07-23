@@ -45,6 +45,22 @@ func (repository *NotificationRepository) CreateForAllUsers(ctx context.Context,
 	return nil
 }
 
+// CreateNovelNotificationForAllUsers fans a novel-level notification
+// (just added, just entered a ranked section) out to every account's
+// inbox — same broadcast-to-everyone model as CreateForAllUsers, just
+// with no chapter behind it (chapter_id stays NULL; both novel_id and
+// chapter_id are nullable as of migration 0013).
+func (repository *NotificationRepository) CreateNovelNotificationForAllUsers(ctx context.Context, novelID, title, body string) error {
+	_, err := repository.pool.Exec(ctx, `
+		INSERT INTO notifications (user_id, novel_id, title, body)
+		SELECT id, $1, $2, $3 FROM users`,
+		novelID, title, body)
+	if err != nil {
+		return fmt.Errorf("create novel notifications: %w", err)
+	}
+	return nil
+}
+
 // CreateBroadcastForAllUsers is the admin composer's send: a general
 // announcement with no novel/chapter behind it, so a tap just opens
 // the inbox instead of navigating anywhere.

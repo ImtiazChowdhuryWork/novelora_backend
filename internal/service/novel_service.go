@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/push"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 )
@@ -15,13 +18,30 @@ const (
 )
 
 type NovelService struct {
-	novels *repository.NovelRepository
-	genres *repository.GenreRepository
-	events realtime.Publisher
+	novels        *repository.NovelRepository
+	genres        *repository.GenreRepository
+	deviceTokens  *repository.DeviceTokenRepository
+	notifications *repository.NotificationRepository
+	notifier      push.Notifier
+	events        realtime.Publisher
 }
 
-func NewNovelService(novels *repository.NovelRepository, genres *repository.GenreRepository, events realtime.Publisher) *NovelService {
-	return &NovelService{novels: novels, genres: genres, events: events}
+func NewNovelService(
+	novels *repository.NovelRepository,
+	genres *repository.GenreRepository,
+	deviceTokens *repository.DeviceTokenRepository,
+	notifications *repository.NotificationRepository,
+	notifier push.Notifier,
+	events realtime.Publisher,
+) *NovelService {
+	return &NovelService{
+		novels:        novels,
+		genres:        genres,
+		deviceTokens:  deviceTokens,
+		notifications: notifications,
+		notifier:      notifier,
+		events:        events,
+	}
 }
 
 func (novelService *NovelService) List(ctx context.Context, filter repository.NovelListFilter) ([]*repository.Novel, int, error) {
@@ -77,7 +97,33 @@ func (novelService *NovelService) Create(ctx context.Context, write repository.N
 		return nil, err
 	}
 	novelService.events.Publish(realtime.Event{Topic: "novel.created", ID: novel.ID})
+	go novelService.notifyNewNovelCreated(novel)
 	return novel, nil
+}
+
+// notifyNewNovelCreated runs on its own timeout-bounded context — never
+// the request's — so a slow or failing push provider can't delay or
+// fail the create response. Same dual-path shape as
+// ChapterService.notifyNewChapterPublished: FCM push and in-app inbox
+// populated independently, so a failure in one doesn't skip the other.
+func (novelService *NovelService) notifyNewNovelCreated(novel *repository.Novel) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	body := fmt.Sprintf("%q was just added", novel.Title)
+
+	tokens, err := novelService.deviceTokens.ListAllTokens(ctx)
+	if err != nil {
+		log.Printf("push: could not load device tokens: %v", err)
+	} else {
+		novelService.notifier.NotifyNovelHighlight(ctx, tokens, novel.ID, novel.Title, body)
+	}
+
+	if err := novelService.notifications.CreateNovelNotificationForAllUsers(ctx, novel.ID, novel.Title, body); err != nil {
+		log.Printf("inbox: could not create notification for novel %s: %v", novel.ID, err)
+		return
+	}
+	novelService.events.Publish(realtime.Event{Topic: "notification.new"})
 }
 
 func (novelService *NovelService) Update(ctx context.Context, novelID string, write repository.NovelWrite, genreIDs []string) (*repository.Novel, error) {

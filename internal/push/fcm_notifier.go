@@ -48,6 +48,10 @@ func (notifier *FCMNotifier) NotifyBroadcast(ctx context.Context, tokens []strin
 	notifier.sendInBatches(ctx, tokens, title, body, nil)
 }
 
+func (notifier *FCMNotifier) NotifyNovelHighlight(ctx context.Context, tokens []string, novelID, novelTitle, body string) {
+	notifier.sendInBatches(ctx, tokens, novelTitle, body, map[string]string{"novel_id": novelID})
+}
+
 func (notifier *FCMNotifier) sendInBatches(ctx context.Context, tokens []string, title, body string, data map[string]string) {
 	if len(tokens) == 0 {
 		return
