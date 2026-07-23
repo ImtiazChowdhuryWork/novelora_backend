@@ -14,4 +14,9 @@ type Notifier interface {
 	// NotifyBroadcast sends a general announcement with no novel behind
 	// it — a tap just opens the inbox rather than navigating anywhere.
 	NotifyBroadcast(ctx context.Context, tokens []string, title, body string)
+
+	// NotifyNovelHighlight sends a push about a novel-level event (just
+	// added, just entered a ranked section) that deep-links to that
+	// novel on tap — same novel_id data contract as NotifyNewChapter.
+	NotifyNovelHighlight(ctx context.Context, tokens []string, novelID, novelTitle, body string)
 }
