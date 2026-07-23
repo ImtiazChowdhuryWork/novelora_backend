@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
@@ -100,17 +101,31 @@ func newNovelResponse(novel *repository.Novel) novelResponse {
 	}
 }
 
-// List returns a page of novels: GET /admin/novels?page=&page_size=&search=&status=
+// List returns a page of novels: GET /admin/novels?page=&page_size=&search=&status=&sort=&genre_ids=&genre_match=
+// genre_ids is a comma-separated list of genre/tag ids; genre_match is
+// "any" (default, OR) or "all" (AND) across that list.
 func (adminNovelHandler *AdminNovelHandler) List(responseWriter http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
 	page, _ := strconv.Atoi(query.Get("page"))
 	pageSize, _ := strconv.Atoi(query.Get("page_size"))
 
+	var genreIDs []string
+	if raw := query.Get("genre_ids"); raw != "" {
+		for _, id := range strings.Split(raw, ",") {
+			if id != "" {
+				genreIDs = append(genreIDs, id)
+			}
+		}
+	}
+
 	filter := repository.NovelListFilter{
-		Search:   query.Get("search"),
-		Status:   query.Get("status"),
-		Page:     page,
-		PageSize: pageSize,
+		Search:         query.Get("search"),
+		Status:         query.Get("status"),
+		Sort:           query.Get("sort"),
+		GenreIDs:       genreIDs,
+		GenreMatchMode: query.Get("genre_match"),
+		Page:           page,
+		PageSize:       pageSize,
 	}
 
 	novels, total, err := adminNovelHandler.novelService.List(request.Context(), filter)

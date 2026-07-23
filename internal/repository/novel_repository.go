@@ -43,7 +43,11 @@ type NovelListFilter struct {
 	Status        string // "", "ongoing", "completed"
 	IsShort       *bool  // nil = both
 	IsRecommended *bool  // nil = both
-	GenreID       string // "" = any genre/tag
+	GenreID       string // "" = any genre/tag; single-value filter used by the public catalog API
+	// GenreIDs is the admin dashboard's multi-select genre/tag filter,
+	// independent of GenreID above. Combined per GenreMatchMode.
+	GenreIDs       []string
+	GenreMatchMode string // "any" (default, OR) | "all" (AND) — only relevant when GenreIDs is non-empty
 	// Sort: "" (manual order), "views", "rating", "new"
 	Sort     string
 	Page     int // 1-based
@@ -94,8 +98,17 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 
 	if filter.Search != "" {
 		arguments = append(arguments, "%"+strings.ToLower(filter.Search)+"%")
-		conditions = append(conditions, fmt.Sprintf(
-			"(lower(n.title) LIKE $%d OR lower(n.author_name) LIKE $%d)", len(arguments), len(arguments)))
+		idx := len(arguments)
+		// Matches title/author OR any genre/tag name the novel carries
+		// (e.g. searching "Comedy" surfaces every novel tagged with that
+		// genre, not just one literally titled "Comedy"). Separate ng2/g2
+		// aliases avoid clashing with the ng alias filter.GenreID's join
+		// below already uses.
+		conditions = append(conditions, fmt.Sprintf(`(lower(n.title) LIKE $%d OR lower(n.author_name) LIKE $%d OR EXISTS (
+			SELECT 1 FROM novel_genres ng2
+			JOIN genres g2 ON g2.id = ng2.genre_id
+			WHERE ng2.novel_id = n.id AND lower(g2.name) LIKE $%d
+		))`, idx, idx, idx))
 	}
 	if filter.Status != "" {
 		arguments = append(arguments, filter.Status)
@@ -108,6 +121,27 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 	if filter.IsRecommended != nil {
 		arguments = append(arguments, *filter.IsRecommended)
 		conditions = append(conditions, fmt.Sprintf("n.is_recommended = $%d", len(arguments)))
+	}
+	if len(filter.GenreIDs) > 0 {
+		arguments = append(arguments, filter.GenreIDs)
+		idsIndex := len(arguments)
+		if filter.GenreMatchMode == "all" {
+			arguments = append(arguments, len(filter.GenreIDs))
+			countIndex := len(arguments)
+			// "All": the novel must carry every selected genre/tag, so the
+			// distinct count of matches has to equal how many were selected.
+			conditions = append(conditions, fmt.Sprintf(`(
+				SELECT count(DISTINCT ng3.genre_id) FROM novel_genres ng3
+				WHERE ng3.novel_id = n.id AND ng3.genre_id = ANY($%d::uuid[])
+			) = $%d`, idsIndex, countIndex))
+		} else {
+			// "Any" (default): the novel just needs to carry at least one
+			// of the selected genres/tags.
+			conditions = append(conditions, fmt.Sprintf(`EXISTS (
+				SELECT 1 FROM novel_genres ng3
+				WHERE ng3.novel_id = n.id AND ng3.genre_id = ANY($%d::uuid[])
+			)`, idsIndex))
+		}
 	}
 	joinClause := ""
 	if filter.GenreID != "" {
