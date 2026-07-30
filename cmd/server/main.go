@@ -58,6 +58,12 @@ func main() {
 	deviceTokenRepository := repository.NewDeviceTokenRepository(pool)
 	notificationRepository := repository.NewNotificationRepository(pool)
 	sectionMembershipRepository := repository.NewSectionMembershipRepository(pool)
+	discoverSectionRepository := repository.NewDiscoverSectionRepository(pool)
+	novelSectionOverrideRepository := repository.NewNovelSectionOverrideRepository(pool)
+	readingHistoryRepository := repository.NewReadingHistoryRepository(pool)
+	novelRatingRepository := repository.NewNovelRatingRepository(pool)
+	novelCommentRepository := repository.NewNovelCommentRepository(pool)
+	novelSupportRepository := repository.NewNovelSupportRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
 	auditLogger := audit.NewLogger(auditLogRepository)
 
@@ -75,26 +81,34 @@ func main() {
 	}
 
 	novelService := service.NewNovelService(
-		novelRepository, genreRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
+		novelRepository, genreRepository, novelRatingRepository, novelSupportRepository,
+		readingHistoryRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	chapterService := service.NewChapterService(
 		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	go runScheduledPublishTicker(chapterService)
 
+	discoverSectionService := service.NewDiscoverSectionService(
+		discoverSectionRepository, novelSectionOverrideRepository, novelRepository, genreRepository, eventHub)
+	readingHistoryService := service.NewReadingHistoryService(readingHistoryRepository, novelRepository, genreRepository)
+	novelCommentService := service.NewNovelCommentService(novelCommentRepository, novelRepository, eventHub)
+
 	rankingNotificationService := service.NewRankingNotificationService(
-		novelRepository, genreRepository, sectionMembershipRepository,
+		discoverSectionService, sectionMembershipRepository,
 		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
 	go runRankingDetectionTicker(rankingNotificationService)
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
-		userRepository, deviceTokenRepository, configuration.JWTSecret,
+		userRepository, deviceTokenRepository, readingHistoryService, configuration.JWTSecret,
 		filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService, auditLogger)
-	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService)
+	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService, readingHistoryService, configuration.JWTSecret)
+	novelCommentHandler := handler.NewNovelCommentHandler(novelCommentService, auditLogger, configuration.JWTSecret)
 	broadcastService := service.NewBroadcastService(deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	notificationHandler := handler.NewNotificationHandler(notificationRepository, broadcastService, auditLogger)
 	genreHandler := handler.NewGenreHandler(genreRepository, auditLogger)
+	discoverSectionHandler := handler.NewDiscoverSectionHandler(discoverSectionService, auditLogger)
 	adminUserHandler := handler.NewAdminUserHandler(userRepository, auditLogger)
 	adminStatsHandler := handler.NewAdminStatsHandler(repository.NewStatsRepository(pool))
 	adminAuditLogHandler := handler.NewAdminAuditLogHandler(auditLogRepository)
@@ -130,6 +144,8 @@ func main() {
 		configuration.JWTSecret, http.HandlerFunc(notificationHandler.MarkAllRead)))
 	mux.Handle("PUT /api/v1/users/me/notifications/{id}/read", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(notificationHandler.MarkRead)))
+	mux.Handle("GET /api/v1/users/me/reading-history", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(userHandler.ReadingHistory)))
 
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
@@ -141,6 +157,30 @@ func main() {
 	mux.HandleFunc("GET /api/v1/novels/{id}/chapters", publicNovelHandler.Chapters)
 	mux.HandleFunc("GET /api/v1/chapters/{id}", publicNovelHandler.Chapter)
 	mux.HandleFunc("GET /api/v1/genres", genreHandler.List)
+	mux.HandleFunc("GET /api/v1/discover-sections", discoverSectionHandler.ListActive)
+	mux.HandleFunc("GET /api/v1/discover-sections/{key}/novels", discoverSectionHandler.Novels)
+
+	// Reader ratings (Phase 5b) — own rating only; requires login
+	mux.Handle("PUT /api/v1/novels/{id}/rating", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(publicNovelHandler.Rate)))
+	mux.Handle("DELETE /api/v1/novels/{id}/rating", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(publicNovelHandler.RemoveRating)))
+
+	// Support (Phase 5d) — a free tap, own support only; requires login
+	mux.Handle("PUT /api/v1/novels/{id}/support", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(publicNovelHandler.Support)))
+	mux.Handle("DELETE /api/v1/novels/{id}/support", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(publicNovelHandler.Unsupport)))
+
+	// Comments (Phase 5c) — reading is public; posting/editing/removing
+	// your own requires login.
+	mux.HandleFunc("GET /api/v1/novels/{id}/comments", novelCommentHandler.List)
+	mux.Handle("POST /api/v1/novels/{id}/comments", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(novelCommentHandler.Create)))
+	mux.Handle("PUT /api/v1/comments/{id}", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(novelCommentHandler.Update)))
+	mux.Handle("DELETE /api/v1/comments/{id}", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(novelCommentHandler.Delete)))
 
 	// Admin: novels (JWT + admin role)
 	requireAdmin := func(handlerFunc http.HandlerFunc) http.Handler {
@@ -154,12 +194,30 @@ func main() {
 	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))
 	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
+	mux.Handle("GET /api/v1/admin/novels/{id}/ratings", requireAdmin(adminNovelHandler.Ratings))
+	mux.Handle("DELETE /api/v1/admin/novels/{id}/ratings/{userId}", requireAdmin(adminNovelHandler.DeleteRating))
+
+	// Admin: comment moderation
+	mux.Handle("GET /api/v1/admin/novels/{id}/comments", requireAdmin(novelCommentHandler.List))
+	mux.Handle("DELETE /api/v1/admin/comments/{id}", requireAdmin(novelCommentHandler.AdminDelete))
 
 	// Admin: genres
 	mux.Handle("GET /api/v1/admin/genres", requireAdmin(genreHandler.List))
 	mux.Handle("POST /api/v1/admin/genres", requireAdmin(genreHandler.Create))
 	mux.Handle("PUT /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Delete))
+
+	// Admin: discover sections (Section Registry) + per-section overrides
+	mux.Handle("GET /api/v1/admin/discover-sections", requireAdmin(discoverSectionHandler.List))
+	mux.Handle("POST /api/v1/admin/discover-sections", requireAdmin(discoverSectionHandler.Create))
+	mux.Handle("PUT /api/v1/admin/discover-sections/{key}", requireAdmin(discoverSectionHandler.Update))
+	mux.Handle("DELETE /api/v1/admin/discover-sections/{key}", requireAdmin(discoverSectionHandler.Delete))
+	mux.Handle("GET /api/v1/admin/discover-sections/{key}/overrides", requireAdmin(discoverSectionHandler.ListOverrides))
+	mux.Handle("GET /api/v1/admin/discover-sections/{key}/preview", requireAdmin(discoverSectionHandler.Preview))
+	mux.Handle("PUT /api/v1/admin/discover-sections/{key}/overrides/{novelId}", requireAdmin(discoverSectionHandler.SetOverride))
+	mux.Handle("DELETE /api/v1/admin/discover-sections/{key}/overrides/{novelId}", requireAdmin(discoverSectionHandler.RemoveOverride))
+	mux.Handle("POST /api/v1/admin/discover-sections/suggest", requireAdmin(discoverSectionHandler.Suggest))
+	mux.Handle("GET /api/v1/admin/novels/{id}/section-overrides", requireAdmin(discoverSectionHandler.NovelOverrides))
 
 	// Admin: users
 	mux.Handle("GET /api/v1/admin/users", requireAdmin(adminUserHandler.List))

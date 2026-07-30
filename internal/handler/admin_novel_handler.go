@@ -35,7 +35,9 @@ type novelWriteRequest struct {
 	Status        string   `json:"status"`
 	IsShort       bool     `json:"is_short"`
 	IsRecommended bool     `json:"is_recommended"`
+	IsExclusive   bool     `json:"is_exclusive"`
 	Rating        *float64 `json:"rating"`
+	ViewCount     int64    `json:"view_count"`
 	GenreIDs      []string `json:"genre_ids"`
 }
 
@@ -47,7 +49,9 @@ func (writeRequest novelWriteRequest) toWrite() repository.NovelWrite {
 		Status:        writeRequest.Status,
 		IsShort:       writeRequest.IsShort,
 		IsRecommended: writeRequest.IsRecommended,
+		IsExclusive:   writeRequest.IsExclusive,
 		Rating:        writeRequest.Rating,
+		ViewCount:     writeRequest.ViewCount,
 	}
 }
 
@@ -66,7 +70,11 @@ type novelResponse struct {
 	Status            string          `json:"status"`
 	IsShort           bool            `json:"is_short"`
 	IsRecommended     bool            `json:"is_recommended"`
+	IsExclusive       bool            `json:"is_exclusive"`
 	Rating            *float64        `json:"rating"`
+	AverageRating     *float64        `json:"average_rating"`
+	RatingCount       int             `json:"rating_count"`
+	SupportCount      int             `json:"support_count"`
 	ViewCount         int64           `json:"view_count"`
 	PublishedChapters int             `json:"published_chapters"`
 	TotalChapters     int             `json:"total_chapters"`
@@ -90,7 +98,11 @@ func newNovelResponse(novel *repository.Novel) novelResponse {
 		Status:            novel.Status,
 		IsShort:           novel.IsShort,
 		IsRecommended:     novel.IsRecommended,
+		IsExclusive:       novel.IsExclusive,
 		Rating:            novel.Rating,
+		AverageRating:     novel.AverageRating,
+		RatingCount:       novel.RatingCount,
+		SupportCount:      novel.SupportCount,
 		ViewCount:         novel.ViewCount,
 		PublishedChapters: novel.PublishedChapters,
 		TotalChapters:     novel.TotalChapters,
@@ -258,4 +270,52 @@ func (adminNovelHandler *AdminNovelHandler) UpdateCover(responseWriter http.Resp
 		return
 	}
 	writeJSON(responseWriter, http.StatusOK, newNovelResponse(novel))
+}
+
+type novelRatingResponse struct {
+	UserID    string    `json:"user_id"`
+	Username  string    `json:"username"`
+	Rating    int       `json:"rating"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Ratings: GET /admin/novels/{id}/ratings — the moderation view behind
+// AdminNovelHandler.DeleteRating: every individual reader rating on
+// this novel, so an admin can find and remove a specific abusive/spam
+// one. There's deliberately no edit here — see NovelService.ListRatings.
+func (adminNovelHandler *AdminNovelHandler) Ratings(responseWriter http.ResponseWriter, request *http.Request) {
+	ratings, err := adminNovelHandler.novelService.ListRatings(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	items := make([]novelRatingResponse, 0, len(ratings))
+	for _, rating := range ratings {
+		items = append(items, novelRatingResponse{
+			UserID:    rating.UserID,
+			Username:  rating.Username,
+			Rating:    rating.Rating,
+			CreatedAt: rating.CreatedAt,
+			UpdatedAt: rating.UpdatedAt,
+		})
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items})
+}
+
+// DeleteRating: DELETE /admin/novels/{id}/ratings/{userId} — moderation
+// removal of one reader's rating (abuse/spam), audit-logged the same as
+// any other admin action; never a hand-edit of the rating's value.
+func (adminNovelHandler *AdminNovelHandler) DeleteRating(responseWriter http.ResponseWriter, request *http.Request) {
+	novelID := request.PathValue("id")
+	userID := request.PathValue("userId")
+
+	if _, err := adminNovelHandler.novelService.AdminRemoveRating(request.Context(), novelID, userID); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel_rating.deleted", "novel", novelID,
+		map[string]any{"rated_by_user_id": userID})
+	responseWriter.WriteHeader(http.StatusNoContent)
 }

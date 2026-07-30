@@ -4,19 +4,35 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
 
-// PublicNovelHandler serves the reader-facing catalog: no auth, no
-// drafts, lean payloads (the app's Discover/Library/reader feed here).
+// PublicNovelHandler serves the reader-facing catalog: no auth required,
+// no drafts, lean payloads (the app's Discover/Library/reader feed here).
+// A Bearer token is still read when present (see optionalUserID) so a
+// logged-in reader's chapter opens can be attributed to their account
+// for reading history — guests remain fully served either way.
 type PublicNovelHandler struct {
 	novelService   *service.NovelService
 	chapterService *service.ChapterService
+	readingHistory *service.ReadingHistoryService
+	jwtSecret      []byte
 }
 
-func NewPublicNovelHandler(novelService *service.NovelService, chapterService *service.ChapterService) *PublicNovelHandler {
-	return &PublicNovelHandler{novelService: novelService, chapterService: chapterService}
+func NewPublicNovelHandler(
+	novelService *service.NovelService,
+	chapterService *service.ChapterService,
+	readingHistory *service.ReadingHistoryService,
+	jwtSecret []byte,
+) *PublicNovelHandler {
+	return &PublicNovelHandler{
+		novelService:   novelService,
+		chapterService: chapterService,
+		readingHistory: readingHistory,
+		jwtSecret:      jwtSecret,
+	}
 }
 
 func parseOptionalBool(value string) *bool {
@@ -32,7 +48,7 @@ func parseOptionalBool(value string) *bool {
 	}
 }
 
-// List: GET /novels?page=&page_size=&search=&status=&is_short=&recommended=
+// List: GET /novels?page=&page_size=&search=&status=&is_short=&recommended=&exclusive=&personalize=
 func (publicNovelHandler *PublicNovelHandler) List(responseWriter http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
 	page, _ := strconv.Atoi(query.Get("page"))
@@ -43,10 +59,20 @@ func (publicNovelHandler *PublicNovelHandler) List(responseWriter http.ResponseW
 		Status:        query.Get("status"),
 		IsShort:       parseOptionalBool(query.Get("is_short")),
 		IsRecommended: parseOptionalBool(query.Get("recommended")),
+		IsExclusive:   parseOptionalBool(query.Get("exclusive")),
 		GenreID:       query.Get("genre_id"),
 		Sort:          query.Get("sort"),
 		Page:          page,
 		PageSize:      pageSize,
+	}
+
+	// Phase 5e: opt-in per-caller personalization (e.g. the app's Picks
+	// For You feed) — a guest, or a request that didn't ask for it,
+	// passes through unchanged. Never overrides an explicit genre_id.
+	if query.Get("personalize") == "true" {
+		if userID, ok := middleware.OptionalUserID(publicNovelHandler.jwtSecret, request); ok {
+			filter = publicNovelHandler.novelService.PersonalizeFilter(request.Context(), filter, userID)
+		}
 	}
 
 	novels, total, err := publicNovelHandler.novelService.List(request.Context(), filter)
@@ -65,14 +91,137 @@ func (publicNovelHandler *PublicNovelHandler) List(responseWriter http.ResponseW
 	})
 }
 
+// novelDetailResponse adds the logged-in caller's own rating and
+// support state on top of the shared novelResponse shape — per-viewer,
+// so only Get (and the rating/support endpoints below) return it,
+// never List or the admin handler.
+type novelDetailResponse struct {
+	novelResponse
+	MyRating  *int `json:"my_rating"`
+	MySupport bool `json:"my_support"`
+}
+
+func newNovelDetailResponse(novel *repository.Novel, myRating *int, mySupport bool) novelDetailResponse {
+	return novelDetailResponse{
+		novelResponse: newNovelResponse(novel),
+		MyRating:      myRating,
+		MySupport:     mySupport,
+	}
+}
+
 // Get: GET /novels/{id}
 func (publicNovelHandler *PublicNovelHandler) Get(responseWriter http.ResponseWriter, request *http.Request) {
-	novel, err := publicNovelHandler.novelService.Get(request.Context(), request.PathValue("id"))
+	novelID := request.PathValue("id")
+	novel, err := publicNovelHandler.novelService.Get(request.Context(), novelID)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, newNovelResponse(novel))
+	// Real read, counts as a view — unlike AdminNovelHandler.Get, which
+	// shares NovelService.Get but must never record a view for an admin
+	// opening the edit form.
+	publicNovelHandler.novelService.RecordView(request.Context(), novelID)
+	novel.ViewCount++
+
+	var myRating *int
+	var mySupport bool
+	if userID, ok := middleware.OptionalUserID(publicNovelHandler.jwtSecret, request); ok {
+		myRating, err = publicNovelHandler.novelService.GetUserRating(request.Context(), novelID, userID)
+		if err != nil {
+			writeServiceError(responseWriter, err)
+			return
+		}
+		mySupport, err = publicNovelHandler.novelService.IsSupportedByUser(request.Context(), novelID, userID)
+		if err != nil {
+			writeServiceError(responseWriter, err)
+			return
+		}
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, mySupport))
+}
+
+type rateNovelRequest struct {
+	Rating int `json:"rating"`
+}
+
+// Rate: PUT /novels/{id}/rating — submits or updates the caller's own
+// 1-5 star rating. Requires the Authenticate middleware.
+func (publicNovelHandler *PublicNovelHandler) Rate(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novelID := request.PathValue("id")
+
+	var body rateNovelRequest
+	if !decodeJSON(responseWriter, request, &body) {
+		return
+	}
+	novel, err := publicNovelHandler.novelService.Rate(request.Context(), novelID, userID, body.Rating)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	mySupport, err := publicNovelHandler.novelService.IsSupportedByUser(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	myRating := body.Rating
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, &myRating, mySupport))
+}
+
+// RemoveRating: DELETE /novels/{id}/rating — withdraws the caller's own
+// rating. Requires the Authenticate middleware.
+func (publicNovelHandler *PublicNovelHandler) RemoveRating(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novelID := request.PathValue("id")
+
+	novel, err := publicNovelHandler.novelService.RemoveRating(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	mySupport, err := publicNovelHandler.novelService.IsSupportedByUser(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, nil, mySupport))
+}
+
+// Support: PUT /novels/{id}/support — a free "Support" tap (Phase 5d,
+// no money involved). Requires the Authenticate middleware.
+func (publicNovelHandler *PublicNovelHandler) Support(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novelID := request.PathValue("id")
+
+	novel, err := publicNovelHandler.novelService.Support(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	myRating, err := publicNovelHandler.novelService.GetUserRating(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, true))
+}
+
+// Unsupport: DELETE /novels/{id}/support — withdraws the caller's own support.
+func (publicNovelHandler *PublicNovelHandler) Unsupport(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novelID := request.PathValue("id")
+
+	novel, err := publicNovelHandler.novelService.Unsupport(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	myRating, err := publicNovelHandler.novelService.GetUserRating(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, false))
 }
 
 // Chapters: GET /novels/{id}/chapters — published only, no content.
@@ -97,6 +246,11 @@ func (publicNovelHandler *PublicNovelHandler) Chapter(responseWriter http.Respon
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
+	}
+	// Best-effort, logged-in readers only — guests aren't tracked, see
+	// Phase 5a's plan note.
+	if userID, ok := middleware.OptionalUserID(publicNovelHandler.jwtSecret, request); ok {
+		publicNovelHandler.readingHistory.RecordRead(request.Context(), userID, chapter.NovelID, chapter.ID)
 	}
 	writeJSON(responseWriter, http.StatusOK, newChapterResponse(chapter))
 }

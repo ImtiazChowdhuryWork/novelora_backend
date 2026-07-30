@@ -13,6 +13,13 @@ import (
 
 var ErrNovelNotFound = errors.New("novel not found")
 
+// minTrustedRatingCount is Phase 5b's threshold: below this many real
+// votes, a novel's average_rating isn't trusted for sorting/display
+// purposes yet — the admin-typed rating is used instead, same as an
+// under-rated novel getting excluded from a ranked shelf rather than
+// sorted at face value (see the plan's Phase 5b note).
+const minTrustedRatingCount = 3
+
 // Novel is a row in the novels table (soft-deleted rows are never returned).
 type Novel struct {
 	ID                string
@@ -23,7 +30,19 @@ type Novel struct {
 	Status            string // "ongoing" | "completed"
 	IsShort           bool
 	IsRecommended     bool
+	IsExclusive       bool
 	Rating            *float64
+	// AverageRating and RatingCount are Phase 5b's real reader-rating
+	// aggregate, recomputed by NovelRatingRepository on every vote —
+	// AverageRating is on the same 0-10 scale as Rating (a 1-5 star vote
+	// doubled), so the two are directly comparable; see the "rating"
+	// sort case below for how they combine.
+	AverageRating     *float64
+	RatingCount       int
+	// SupportCount is Phase 5d's free "Support" tap tally, recomputed by
+	// NovelSupportRepository on every add/remove — a like/favorite, not
+	// a monetary gift (see the plan's Phase 5d note).
+	SupportCount      int
 	ViewCount         int64
 	PublishedChapters int
 	TotalChapters     int
@@ -43,12 +62,15 @@ type NovelListFilter struct {
 	Status        string // "", "ongoing", "completed"
 	IsShort       *bool  // nil = both
 	IsRecommended *bool  // nil = both
+	IsExclusive   *bool  // nil = both
 	GenreID       string // "" = any genre/tag; single-value filter used by the public catalog API
 	// GenreIDs is the admin dashboard's multi-select genre/tag filter,
 	// independent of GenreID above. Combined per GenreMatchMode.
 	GenreIDs       []string
 	GenreMatchMode string // "any" (default, OR) | "all" (AND) — only relevant when GenreIDs is non-empty
-	// Sort: "" (manual order), "views", "rating", "new"
+	// Sort: "" (manual order), "views" (lifetime view_count), "trending"
+	// (7-day recent-activity score, see the List switch below), "rating",
+	// "new"
 	Sort     string
 	Page     int // 1-based
 	PageSize int
@@ -62,7 +84,13 @@ type NovelWrite struct {
 	Status        string
 	IsShort       bool
 	IsRecommended bool
+	IsExclusive   bool
 	Rating        *float64
+	// ViewCount is the admin-editable override of the lifetime view
+	// counter — always writable, additive to the automatic increments
+	// RecordView makes on real reads (never made read-only for either
+	// source).
+	ViewCount int64
 }
 
 type NovelRepository struct {
@@ -75,7 +103,8 @@ func NewNovelRepository(pool *pgxpool.Pool) *NovelRepository {
 
 const novelColumns = `
 	n.id, n.title, n.author_name, n.synopsis, coalesce(n.cover_url, ''),
-	n.status, n.is_short, n.is_recommended, n.rating, n.view_count,
+	n.status, n.is_short, n.is_recommended, n.is_exclusive, n.rating,
+	n.average_rating, n.rating_count, n.support_count, n.view_count,
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id AND c.status = 'published'),
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id),
 	n.sort_order, n.created_at, n.updated_at`
@@ -84,7 +113,8 @@ func scanNovel(row pgx.Row) (*Novel, error) {
 	novel := &Novel{}
 	err := row.Scan(
 		&novel.ID, &novel.Title, &novel.AuthorName, &novel.Synopsis, &novel.CoverURL,
-		&novel.Status, &novel.IsShort, &novel.IsRecommended, &novel.Rating, &novel.ViewCount,
+		&novel.Status, &novel.IsShort, &novel.IsRecommended, &novel.IsExclusive, &novel.Rating,
+		&novel.AverageRating, &novel.RatingCount, &novel.SupportCount, &novel.ViewCount,
 		&novel.PublishedChapters, &novel.TotalChapters,
 		&novel.SortOrder, &novel.CreatedAt, &novel.UpdatedAt,
 	)
@@ -121,6 +151,10 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 	if filter.IsRecommended != nil {
 		arguments = append(arguments, *filter.IsRecommended)
 		conditions = append(conditions, fmt.Sprintf("n.is_recommended = $%d", len(arguments)))
+	}
+	if filter.IsExclusive != nil {
+		arguments = append(arguments, *filter.IsExclusive)
+		conditions = append(conditions, fmt.Sprintf("n.is_exclusive = $%d", len(arguments)))
 	}
 	if len(filter.GenreIDs) > 0 {
 		arguments = append(arguments, filter.GenreIDs)
@@ -162,8 +196,29 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 	switch filter.Sort {
 	case "views":
 		orderClause = "n.view_count DESC, n.created_at DESC"
+	case "trending":
+		// Real, transparent 7-day-activity score — recent views (from
+		// novel_daily_views, see NovelRepository.RecordView) decayed by
+		// age, Hacker-News-"hot"-style, so a novel that was popular once
+		// doesn't rank #1 forever and a brand-new novel isn't unfairly
+		// buried against one with a longer history. No hidden formula:
+		// one tunable gravity constant (1.5). Ties (typically two novels
+		// with zero recent views) fall back to lifetime view_count for a
+		// stable order instead of an arbitrary one.
+		orderClause = `(
+			coalesce((
+				SELECT sum(v.views) FROM novel_daily_views v
+				WHERE v.novel_id = n.id AND v.day >= current_date - interval '7 days'
+			), 0)
+			/ power(extract(epoch FROM (now() - n.created_at)) / 86400.0 + 2, 1.5)
+		) DESC, n.view_count DESC`
 	case "rating":
-		orderClause = "n.rating DESC NULLS LAST, n.view_count DESC"
+		// Real reader ratings once there are enough of them to trust;
+		// the admin-typed rating is the fallback below that threshold
+		// (also covers novels nobody has rated yet, average_rating NULL).
+		orderClause = fmt.Sprintf(`(
+			CASE WHEN n.rating_count >= %d THEN n.average_rating ELSE n.rating END
+		) DESC NULLS LAST, n.view_count DESC`, minTrustedRatingCount)
 	case "new":
 		orderClause = "n.created_at DESC"
 	}
@@ -188,6 +243,33 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 	return novels, total, rows.Err()
 }
 
+// ListByIDs batches a lookup for a specific set of novels — used to
+// materialize pinned overrides (see DiscoverSectionService.Resolve) into
+// full Novel records. Order is not guaranteed to match ids; callers that
+// care about order (pinned position) re-sort themselves. Deleted novels
+// and unknown ids are silently omitted, not errors.
+func (repository *NovelRepository) ListByIDs(ctx context.Context, ids []string) ([]*Novel, error) {
+	if len(ids) == 0 {
+		return []*Novel{}, nil
+	}
+	rows, err := repository.pool.Query(ctx,
+		"SELECT "+novelColumns+" FROM novels n WHERE n.id = ANY($1) AND n.deleted_at IS NULL", ids)
+	if err != nil {
+		return nil, fmt.Errorf("list novels by ids: %w", err)
+	}
+	defer rows.Close()
+
+	novels := []*Novel{}
+	for rows.Next() {
+		novel, err := scanNovel(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan novel: %w", err)
+		}
+		novels = append(novels, novel)
+	}
+	return novels, rows.Err()
+}
+
 func (repository *NovelRepository) GetByID(ctx context.Context, novelID string) (*Novel, error) {
 	novel, err := scanNovel(repository.pool.QueryRow(ctx,
 		"SELECT "+novelColumns+" FROM novels n WHERE n.id = $1 AND n.deleted_at IS NULL",
@@ -205,13 +287,13 @@ func (repository *NovelRepository) GetByID(ctx context.Context, novelID string) 
 func (repository *NovelRepository) Create(ctx context.Context, write NovelWrite) (*Novel, error) {
 	novel, err := scanNovel(repository.pool.QueryRow(ctx, `
 		WITH inserted AS (
-			INSERT INTO novels (title, author_name, synopsis, status, is_short, is_recommended, rating, sort_order)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT coalesce(max(sort_order), 0) + 1 FROM novels))
+			INSERT INTO novels (title, author_name, synopsis, status, is_short, is_recommended, is_exclusive, rating, view_count, sort_order)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT coalesce(max(sort_order), 0) + 1 FROM novels))
 			RETURNING *
 		)
 		SELECT `+novelColumns+` FROM inserted n`,
 		write.Title, write.AuthorName, write.Synopsis, write.Status,
-		write.IsShort, write.IsRecommended, write.Rating))
+		write.IsShort, write.IsRecommended, write.IsExclusive, write.Rating, write.ViewCount))
 	if err != nil {
 		return nil, fmt.Errorf("insert novel: %w", err)
 	}
@@ -257,13 +339,13 @@ func (repository *NovelRepository) Update(ctx context.Context, novelID string, w
 		WITH updated AS (
 			UPDATE novels SET
 				title = $2, author_name = $3, synopsis = $4, status = $5,
-				is_short = $6, is_recommended = $7, rating = $8, updated_at = now()
+				is_short = $6, is_recommended = $7, is_exclusive = $8, rating = $9, view_count = $10, updated_at = now()
 			WHERE id = $1 AND deleted_at IS NULL
 			RETURNING *
 		)
 		SELECT `+novelColumns+` FROM updated n`,
 		novelID, write.Title, write.AuthorName, write.Synopsis, write.Status,
-		write.IsShort, write.IsRecommended, write.Rating))
+		write.IsShort, write.IsRecommended, write.IsExclusive, write.Rating, write.ViewCount))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNovelNotFound
 	}
@@ -284,6 +366,45 @@ func (repository *NovelRepository) UpdateCoverURL(ctx context.Context, novelID, 
 	}
 	if commandTag.RowsAffected() == 0 {
 		return ErrNovelNotFound
+	}
+	return nil
+}
+
+// RecordView increments a novel's lifetime view_count and today's
+// rolling daily-view row (novel_daily_views) — the automatic signal
+// the trending score is computed from. Additive to the admin-editable
+// ViewCount in NovelWrite, never a replacement for it: an admin can
+// still set view_count to anything, and real reads keep incrementing
+// from whatever value is currently there. Best-effort by design —
+// callers should log-and-continue rather than fail the read that
+// triggered this.
+func (repository *NovelRepository) RecordView(ctx context.Context, novelID string) error {
+	transaction, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin record view: %w", err)
+	}
+	defer transaction.Rollback(ctx)
+
+	commandTag, err := transaction.Exec(ctx,
+		"UPDATE novels SET view_count = view_count + 1 WHERE id = $1 AND deleted_at IS NULL",
+		novelID)
+	if err != nil {
+		return fmt.Errorf("increment view_count: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNovelNotFound
+	}
+
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO novel_daily_views (novel_id, day, views)
+		VALUES ($1, current_date, 1)
+		ON CONFLICT (novel_id, day) DO UPDATE SET views = novel_daily_views.views + 1`,
+		novelID); err != nil {
+		return fmt.Errorf("record daily view: %w", err)
+	}
+
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit record view: %w", err)
 	}
 	return nil
 }

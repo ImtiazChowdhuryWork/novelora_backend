@@ -18,29 +18,38 @@ const (
 )
 
 type NovelService struct {
-	novels        *repository.NovelRepository
-	genres        *repository.GenreRepository
-	deviceTokens  *repository.DeviceTokenRepository
-	notifications *repository.NotificationRepository
-	notifier      push.Notifier
-	events        realtime.Publisher
+	novels         *repository.NovelRepository
+	genres         *repository.GenreRepository
+	ratings        *repository.NovelRatingRepository
+	supports       *repository.NovelSupportRepository
+	readingHistory *repository.ReadingHistoryRepository
+	deviceTokens   *repository.DeviceTokenRepository
+	notifications  *repository.NotificationRepository
+	notifier       push.Notifier
+	events         realtime.Publisher
 }
 
 func NewNovelService(
 	novels *repository.NovelRepository,
 	genres *repository.GenreRepository,
+	ratings *repository.NovelRatingRepository,
+	supports *repository.NovelSupportRepository,
+	readingHistory *repository.ReadingHistoryRepository,
 	deviceTokens *repository.DeviceTokenRepository,
 	notifications *repository.NotificationRepository,
 	notifier push.Notifier,
 	events realtime.Publisher,
 ) *NovelService {
 	return &NovelService{
-		novels:        novels,
-		genres:        genres,
-		deviceTokens:  deviceTokens,
-		notifications: notifications,
-		notifier:      notifier,
-		events:        events,
+		novels:         novels,
+		genres:         genres,
+		ratings:        ratings,
+		supports:       supports,
+		readingHistory: readingHistory,
+		deviceTokens:   deviceTokens,
+		notifications:  notifications,
+		notifier:       notifier,
+		events:         events,
 	}
 }
 
@@ -68,6 +77,37 @@ func (novelService *NovelService) List(ctx context.Context, filter repository.No
 		return nil, 0, err
 	}
 	return novels, total, nil
+}
+
+// personalizationGenreCount is Phase 5e's "top 2-3 genres" — the plan's
+// own phrasing; 3 read as the inclusive end of that range.
+const personalizationGenreCount = 3
+
+// PersonalizeFilter is Phase 5e: layers a logged-in reader's own top
+// genres (by reading_history frequency) onto filter as an "any of
+// these" match, reusing NovelListFilter's existing GenreIDs/any
+// mechanism (already built for the admin dashboard's multi-select
+// filter) rather than inventing a new one. A guest, or a reader with no
+// history yet, gets filter back unchanged — List then falls through to
+// its ordinary global result, exactly the "nobody ever sees an empty
+// section" fallback the plan calls for. Deliberately only fills in
+// GenreIDs when the caller hasn't already set one (never overrides an
+// explicit request).
+func (novelService *NovelService) PersonalizeFilter(ctx context.Context, filter repository.NovelListFilter, userID string) repository.NovelListFilter {
+	if userID == "" || filter.GenreID != "" || len(filter.GenreIDs) > 0 {
+		return filter
+	}
+	topGenreIDs, err := novelService.readingHistory.TopGenreIDs(ctx, userID, personalizationGenreCount)
+	if err != nil {
+		log.Printf("personalize: could not load top genres for user %s: %v", userID, err)
+		return filter
+	}
+	if len(topGenreIDs) == 0 {
+		return filter
+	}
+	filter.GenreIDs = topGenreIDs
+	filter.GenreMatchMode = "any"
+	return filter
 }
 
 func (novelService *NovelService) Get(ctx context.Context, novelID string) (*repository.Novel, error) {
@@ -145,6 +185,100 @@ func (novelService *NovelService) Update(ctx context.Context, novelID string, wr
 	return novel, nil
 }
 
+// RecordView is called by the reader-facing (public) novel handler
+// only — never the admin handler, since AdminNovelHandler.Get shares
+// NovelService.Get with it and an admin opening the edit form isn't a
+// real read. Best-effort: logs and swallows the error rather than
+// failing the request that triggered it, since a missed view count
+// isn't worth a broken page.
+func (novelService *NovelService) RecordView(ctx context.Context, novelID string) {
+	if err := novelService.novels.RecordView(ctx, novelID); err != nil {
+		log.Printf("record view for novel %s: %v", novelID, err)
+	}
+}
+
+// Rate submits or updates userID's own 1-5 star rating of novelID, then
+// returns the novel with its freshly recomputed aggregate. Deliberately
+// not realtime-broadcast — as frequent as view increments, and the
+// small aggregate shift isn't worth a refetch signal to every connected
+// client; a "rating" section's membership catches up on the existing
+// ranking ticker's cadence like any other sort (see Phase 2).
+func (novelService *NovelService) Rate(ctx context.Context, novelID, userID string, rating int) (*repository.Novel, error) {
+	if rating < 1 || rating > 5 {
+		return nil, &ValidationError{Message: "rating must be between 1 and 5"}
+	}
+	if _, err := novelService.novels.GetByID(ctx, novelID); err != nil {
+		return nil, err
+	}
+	if err := novelService.ratings.Upsert(ctx, novelID, userID, rating); err != nil {
+		return nil, err
+	}
+	return novelService.Get(ctx, novelID)
+}
+
+// RemoveRating withdraws userID's own rating of novelID, if any.
+func (novelService *NovelService) RemoveRating(ctx context.Context, novelID, userID string) (*repository.Novel, error) {
+	if _, err := novelService.novels.GetByID(ctx, novelID); err != nil {
+		return nil, err
+	}
+	if err := novelService.ratings.Remove(ctx, novelID, userID); err != nil {
+		return nil, err
+	}
+	return novelService.Get(ctx, novelID)
+}
+
+// GetUserRating is the logged-in caller's own rating of novelID, for
+// the novel detail response's "my_rating" — nil if they haven't rated it.
+func (novelService *NovelService) GetUserRating(ctx context.Context, novelID, userID string) (*int, error) {
+	return novelService.ratings.GetForUser(ctx, novelID, userID)
+}
+
+// ListRatings is the admin moderation view: every individual rating on
+// novelID, so an admin can identify and remove a single abusive/spam
+// one (see AdminRemoveRating) — never hand-edits an existing rating.
+func (novelService *NovelService) ListRatings(ctx context.Context, novelID string) ([]*repository.NovelRating, error) {
+	return novelService.ratings.ListForNovel(ctx, novelID)
+}
+
+// AdminRemoveRating is the moderation counterpart of RemoveRating: an
+// admin removing a specific reader's rating rather than a reader
+// removing their own.
+func (novelService *NovelService) AdminRemoveRating(ctx context.Context, novelID, userID string) (*repository.Novel, error) {
+	return novelService.RemoveRating(ctx, novelID, userID)
+}
+
+// Support records userID's free "Support" tap on novelID — idempotent,
+// tapping again while already supporting is a no-op. Deliberately not
+// realtime-broadcast, same reasoning as views/ratings (see the plan's
+// Phase 5d note): as frequent as either, and the small count shift
+// isn't worth a refetch signal to every connected client.
+func (novelService *NovelService) Support(ctx context.Context, novelID, userID string) (*repository.Novel, error) {
+	if _, err := novelService.novels.GetByID(ctx, novelID); err != nil {
+		return nil, err
+	}
+	if err := novelService.supports.Add(ctx, novelID, userID); err != nil {
+		return nil, err
+	}
+	return novelService.Get(ctx, novelID)
+}
+
+// Unsupport withdraws userID's support of novelID.
+func (novelService *NovelService) Unsupport(ctx context.Context, novelID, userID string) (*repository.Novel, error) {
+	if _, err := novelService.novels.GetByID(ctx, novelID); err != nil {
+		return nil, err
+	}
+	if err := novelService.supports.Remove(ctx, novelID, userID); err != nil {
+		return nil, err
+	}
+	return novelService.Get(ctx, novelID)
+}
+
+// IsSupportedByUser is the logged-in caller's own support state for
+// novelID, for the novel detail response's "my_support".
+func (novelService *NovelService) IsSupportedByUser(ctx context.Context, novelID, userID string) (bool, error) {
+	return novelService.supports.IsSupportedByUser(ctx, novelID, userID)
+}
+
 // attachGenres populates Genres on every novel in one batched query.
 func (novelService *NovelService) attachGenres(ctx context.Context, novels []*repository.Novel) error {
 	novelIDs := make([]string, len(novels))
@@ -210,6 +344,9 @@ func validateNovelWrite(write *repository.NovelWrite) error {
 	}
 	if write.Rating != nil && (*write.Rating < 0 || *write.Rating > 10) {
 		return &ValidationError{Message: "rating must be between 0 and 10"}
+	}
+	if write.ViewCount < 0 {
+		return &ValidationError{Message: "view count cannot be negative"}
 	}
 	return nil
 }
