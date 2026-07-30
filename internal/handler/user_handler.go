@@ -4,15 +4,16 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
 
 type UserHandler struct {
 	users            *repository.UserRepository
 	deviceTokens     *repository.DeviceTokenRepository
+	readingHistory   *service.ReadingHistoryService
 	jwtSecret        []byte
 	avatarsDirectory string
 	avatarsUrlPrefix string
@@ -21,12 +22,14 @@ type UserHandler struct {
 func NewUserHandler(
 	users *repository.UserRepository,
 	deviceTokens *repository.DeviceTokenRepository,
+	readingHistory *service.ReadingHistoryService,
 	jwtSecret []byte,
 	avatarsDirectory string,
 ) *UserHandler {
 	return &UserHandler{
 		users:            users,
 		deviceTokens:     deviceTokens,
+		readingHistory:   readingHistory,
 		jwtSecret:        jwtSecret,
 		avatarsDirectory: avatarsDirectory,
 		avatarsUrlPrefix: "/uploads/avatars/",
@@ -57,7 +60,10 @@ func (userHandler *UserHandler) RegisterDeviceToken(responseWriter http.Response
 		platform = "android"
 	}
 
-	userID := userHandler.optionalUserID(request)
+	var userID *string
+	if id, ok := middleware.OptionalUserID(userHandler.jwtSecret, request); ok {
+		userID = &id
+	}
 	if err := userHandler.deviceTokens.Upsert(request.Context(), userID, tokenRequest.Token, platform); err != nil {
 		userHandler.internalError(responseWriter, err)
 		return
@@ -65,19 +71,20 @@ func (userHandler *UserHandler) RegisterDeviceToken(responseWriter http.Response
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
-// optionalUserID resolves the caller from a Bearer token if one is
-// present and valid; a missing or invalid token is not an error here
-// (unlike Authenticate) — it just means an anonymous registration.
-func (userHandler *UserHandler) optionalUserID(request *http.Request) *string {
-	tokenString, hasBearerPrefix := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
-	if !hasBearerPrefix || tokenString == "" {
-		return nil
-	}
-	claims, err := middleware.ValidateAccessToken(userHandler.jwtSecret, tokenString)
+// ReadingHistory: GET /users/me/reading-history — Phase 5a's backing
+// data for Library's Viewed tab. Requires the Authenticate middleware.
+func (userHandler *UserHandler) ReadingHistory(responseWriter http.ResponseWriter, request *http.Request) {
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novels, err := userHandler.readingHistory.ListForUser(request.Context(), userID)
 	if err != nil {
-		return nil
+		userHandler.internalError(responseWriter, err)
+		return
 	}
-	return &claims.UserID
+	items := make([]novelResponse, 0, len(novels))
+	for _, novel := range novels {
+		items = append(items, newNovelResponse(novel))
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items})
 }
 
 // CurrentUser returns the account of the authenticated caller.

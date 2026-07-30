@@ -94,6 +94,24 @@ func RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// OptionalUserID resolves the caller from a Bearer token if one is
+// present and valid; a missing or invalid token is not an error here
+// (unlike Authenticate) — it just means an anonymous/guest request.
+// For routes that serve both guests and logged-in readers the same
+// content, but want to attribute the request to an account when one is
+// available (e.g. recording reading history on chapter open).
+func OptionalUserID(jwtSecret []byte, request *http.Request) (userID string, ok bool) {
+	tokenString, hasBearerPrefix := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
+	if !hasBearerPrefix || tokenString == "" {
+		return "", false
+	}
+	claims, err := ValidateAccessToken(jwtSecret, tokenString)
+	if err != nil {
+		return "", false
+	}
+	return claims.UserID, true
+}
+
 func writeAuthError(responseWriter http.ResponseWriter, statusCode int, message string) {
 	responseWriter.Header().Set("Content-Type", "application/json")
 	responseWriter.WriteHeader(statusCode)
