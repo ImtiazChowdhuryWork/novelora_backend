@@ -228,20 +228,23 @@ func (handler *DiscoverSectionHandler) RemoveOverride(responseWriter http.Respon
 
 const defaultSectionNovelsPageSize = 12
 
-// Novels: GET /discover-sections/{key}/novels?page_size=N — public,
+// Novels: GET /discover-sections/{key}/novels?page_size=N&page=N — public,
 // reader-facing resolve (algorithmic fill + admin overrides applied).
-// This is what the app fetches to populate a migrated category's shelf
-// preview; unlike Preview below, no admin auth required — same tier as
-// GET /novels. "See All" pagination deliberately still queries the raw
-// /novels endpoint directly (see each migrated *_tab_content.dart widget)
-// rather than through here — overrides are meant to shape what's
-// featured on the category screen itself, not the full catalog browse.
+// This backs both the shelf preview (page omitted/1, small page_size) and
+// the app's "More" list for every registry-driven section (larger
+// page_size, page 2+ as the reader scrolls) — one resolved list, same
+// pins/excludes applied, wherever a section's novels are shown. No admin
+// auth required — same tier as GET /novels.
 func (handler *DiscoverSectionHandler) Novels(responseWriter http.ResponseWriter, request *http.Request) {
 	pageSize, err := strconv.Atoi(request.URL.Query().Get("page_size"))
 	if err != nil || pageSize <= 0 {
 		pageSize = defaultSectionNovelsPageSize
 	}
-	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), pageSize)
+	page, err := strconv.Atoi(request.URL.Query().Get("page"))
+	if err != nil || page <= 0 {
+		page = 1
+	}
+	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), page, pageSize)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
@@ -260,7 +263,7 @@ const previewLimit = 20
 // admin editing a section or an override can see the real effect
 // immediately instead of having to open the app.
 func (handler *DiscoverSectionHandler) Preview(responseWriter http.ResponseWriter, request *http.Request) {
-	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), previewLimit)
+	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), 1, previewLimit)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return

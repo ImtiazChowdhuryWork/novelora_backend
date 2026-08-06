@@ -285,25 +285,48 @@ func (service *DiscoverSectionService) RemoveOverride(ctx context.Context, secti
 	return nil
 }
 
-// Resolve computes a section's actual novel list: algorithmic fill (per
-// its scope/genre_names/sort/filter) → drop excluded overrides and
-// exclude_section_keys → splice in pinned overrides (at Position if set,
-// else the front) → trim to limit, deduped throughout. This is the one
+// Resolve computes one page of a section's actual novel list: algorithmic
+// fill (per its scope/genre_names/sort/filter) → drop excluded overrides
+// and exclude_section_keys → splice in pinned overrides (at Position if
+// set, else the front) → paginate, deduped throughout. This is the one
 // place section membership is actually computed — RankingNotificationService
-// uses it directly (see its DetectAndNotify), and it's the eventual
-// backing for any app-facing "give me this section's novels" endpoint.
-func (service *DiscoverSectionService) Resolve(ctx context.Context, key string, limit int) ([]*repository.Novel, error) {
+// uses it directly (see its DetectAndNotify), it backs the shelf preview
+// (page 1), and it backs the app's "More" list for every registry-driven
+// section (see NewWSHandler's sibling, the Novels handler) — one source
+// of truth for a section's content everywhere it's shown, not just the
+// curated preview row.
+//
+// Pagination re-derives the full pinned+algorithmic sequence from the top
+// on every call rather than tracking a true DB offset — simpler and
+// correctness-first, since pinned novels can only be interleaved right by
+// looking at the whole sequence up to the requested depth. Fine for how
+// deep a reader actually scrolls a "More" list; not meant for bulk export.
+func (service *DiscoverSectionService) Resolve(ctx context.Context, key string, page, pageSize int) ([]*repository.Novel, error) {
 	section, err := service.sections.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	novels, err := service.resolveSection(ctx, section, limit, maxExcludeDepth)
+	if page < 1 {
+		page = 1
+	}
+	depth := page * pageSize
+	novels, err := service.resolveSection(ctx, section, depth, maxExcludeDepth)
 	if err != nil {
 		return nil, err
 	}
+	start := (page - 1) * pageSize
+	if start >= len(novels) {
+		novels = []*repository.Novel{}
+	} else {
+		end := start + pageSize
+		if end > len(novels) {
+			end = len(novels)
+		}
+		novels = novels[start:end]
+	}
 	// NovelRepository.List/ListByIDs deliberately don't populate Genres
 	// (see Novel's own doc comment — that's NovelService's job); attached
-	// once here, on the final result only, not on every internal
+	// once here, on the final page only, not on every internal
 	// algorithmic/exclude-resolution fetch along the way, since those
 	// never need it themselves.
 	if err := attachGenres(ctx, service.genres, novels); err != nil {
@@ -359,8 +382,14 @@ func (service *DiscoverSectionService) resolveSection(ctx context.Context, secti
 
 	seen := make(map[string]bool, len(filtered)+len(pinnedIDs))
 	result := make([]*repository.Novel, 0, len(filtered)+len(pinnedIDs))
-	for _, novel := range pinnedNovels {
-		if seen[novel.ID] {
+	// Walk pinnedIDs (already ordered by Position via ListForSection's
+	// "ORDER BY type, position NULLS LAST"), not pinnedNovels — Postgres'
+	// `WHERE id = ANY($1)` does not preserve the input array's order, so
+	// splicing in DB-return order here would silently discard whatever
+	// Position an admin set.
+	for _, novelID := range pinnedIDs {
+		novel, ok := pinnedByID[novelID]
+		if !ok || seen[novel.ID] {
 			continue
 		}
 		seen[novel.ID] = true
@@ -463,7 +492,13 @@ func (service *DiscoverSectionService) algorithmicFill(ctx context.Context, sect
 		merged := make([]*repository.Novel, 0, limit)
 		seen := make(map[string]bool, limit)
 		fanoutFilter := baseFilter
+		// Deep "More" pages ask for more than the shelf-preview-sized
+		// default fanout — widen it to match, or a page past the first
+		// would silently come back short even when more results exist.
 		fanoutFilter.PageSize = sectionResolveFanout
+		if limit > fanoutFilter.PageSize {
+			fanoutFilter.PageSize = limit
+		}
 		for _, name := range section.GenreNames {
 			genreID, ok := byName[name]
 			if !ok {

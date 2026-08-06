@@ -30,18 +30,30 @@ type client struct {
 	userID     string
 }
 
-// NewWSHandler upgrades authenticated requests to WebSocket connections
-// registered with the hub. Browsers cannot set headers on WebSocket
-// requests, so the access token arrives as a query parameter.
+// NewWSHandler upgrades requests to WebSocket connections registered with
+// the hub. Browsers cannot set headers on WebSocket requests, so the
+// access token arrives as a query parameter.
+//
+// The token is optional: every broadcast Event on the hub is a public,
+// unfiltered "the catalog changed" signal (see Hub.Run — no per-user
+// targeting), and Discover/category screens are fully browsable before
+// login. A visitor with no token connects anonymously (userID ""); a
+// token that IS present but invalid/expired is still rejected, since
+// that's a real auth problem worth surfacing rather than silently
+// downgrading to visitor.
 func NewWSHandler(hub *Hub, jwtSecret []byte) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		tokenString := request.URL.Query().Get("token")
-		claims, err := middleware.ValidateAccessToken(jwtSecret, tokenString)
-		if err != nil {
-			responseWriter.Header().Set("Content-Type", "application/json")
-			responseWriter.WriteHeader(http.StatusUnauthorized)
-			responseWriter.Write([]byte(`{"error":"access token is invalid or expired"}`))
-			return
+		var userID string
+		if tokenString != "" {
+			claims, err := middleware.ValidateAccessToken(jwtSecret, tokenString)
+			if err != nil {
+				responseWriter.Header().Set("Content-Type", "application/json")
+				responseWriter.WriteHeader(http.StatusUnauthorized)
+				responseWriter.Write([]byte(`{"error":"access token is invalid or expired"}`))
+				return
+			}
+			userID = claims.UserID
 		}
 
 		connection, err := upgrader.Upgrade(responseWriter, request, nil)
@@ -53,7 +65,7 @@ func NewWSHandler(hub *Hub, jwtSecret []byte) http.Handler {
 		connectedClient := &client{
 			connection: connection,
 			send:       make(chan []byte, sendBufferSize),
-			userID:     claims.UserID,
+			userID:     userID,
 		}
 		hub.register <- connectedClient
 
