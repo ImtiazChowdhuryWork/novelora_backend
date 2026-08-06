@@ -64,7 +64,7 @@ func (rankingService *RankingNotificationService) DetectAndNotify(ctx context.Co
 	}
 
 	for _, section := range sections {
-		novels, err := rankingService.discoverSections.Resolve(ctx, section.Key, rankingCheckLimit)
+		novels, err := rankingService.discoverSections.Resolve(ctx, section.Key, 1, rankingCheckLimit)
 		if err != nil {
 			log.Printf("ranking: resolve %s: %v", section.Key, err)
 			continue
