@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
@@ -33,11 +34,12 @@ const sectionResolveFanout = 50
 const excludeSiblingLimit = 12
 
 type DiscoverSectionService struct {
-	sections  *repository.DiscoverSectionRepository
-	overrides *repository.NovelSectionOverrideRepository
-	novels    *repository.NovelRepository
-	genres    *repository.GenreRepository
-	events    realtime.Publisher
+	sections       *repository.DiscoverSectionRepository
+	overrides      *repository.NovelSectionOverrideRepository
+	novels         *repository.NovelRepository
+	genres         *repository.GenreRepository
+	readingHistory *repository.ReadingHistoryRepository
+	events         realtime.Publisher
 }
 
 func NewDiscoverSectionService(
@@ -45,14 +47,16 @@ func NewDiscoverSectionService(
 	overrides *repository.NovelSectionOverrideRepository,
 	novels *repository.NovelRepository,
 	genres *repository.GenreRepository,
+	readingHistory *repository.ReadingHistoryRepository,
 	events realtime.Publisher,
 ) *DiscoverSectionService {
 	return &DiscoverSectionService{
-		sections:  sections,
-		overrides: overrides,
-		novels:    novels,
-		genres:    genres,
-		events:    events,
+		sections:       sections,
+		overrides:      overrides,
+		novels:         novels,
+		genres:         genres,
+		readingHistory: readingHistory,
+		events:         events,
 	}
 }
 
@@ -301,7 +305,7 @@ func (service *DiscoverSectionService) RemoveOverride(ctx context.Context, secti
 // correctness-first, since pinned novels can only be interleaved right by
 // looking at the whole sequence up to the requested depth. Fine for how
 // deep a reader actually scrolls a "More" list; not meant for bulk export.
-func (service *DiscoverSectionService) Resolve(ctx context.Context, key string, page, pageSize int) ([]*repository.Novel, error) {
+func (service *DiscoverSectionService) Resolve(ctx context.Context, key string, page, pageSize int, userID string) ([]*repository.Novel, error) {
 	section, err := service.sections.Get(ctx, key)
 	if err != nil {
 		return nil, err
@@ -310,7 +314,7 @@ func (service *DiscoverSectionService) Resolve(ctx context.Context, key string, 
 		page = 1
 	}
 	depth := page * pageSize
-	novels, err := service.resolveSection(ctx, section, depth, maxExcludeDepth)
+	novels, err := service.resolveSection(ctx, section, depth, maxExcludeDepth, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -335,13 +339,13 @@ func (service *DiscoverSectionService) Resolve(ctx context.Context, key string, 
 	return novels, nil
 }
 
-func (service *DiscoverSectionService) resolveSection(ctx context.Context, section *repository.DiscoverSection, limit, excludeDepth int) ([]*repository.Novel, error) {
-	base, err := service.algorithmicFill(ctx, section, limit)
+func (service *DiscoverSectionService) resolveSection(ctx context.Context, section *repository.DiscoverSection, limit, excludeDepth int, userID string) ([]*repository.Novel, error) {
+	base, err := service.algorithmicFill(ctx, section, limit, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", section.Key, err)
 	}
 
-	excludedIDs, err := service.resolveExcludedIDs(ctx, section.ExcludeSectionKeys, excludeDepth)
+	excludedIDs, err := service.resolveExcludedIDs(ctx, section.ExcludeSectionKeys, excludeDepth, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +422,7 @@ func trimNovels(novels []*repository.Novel, limit int) []*repository.Novel {
 // exclude_section_keys beyond excludeDepth), matching how the app's own
 // exclusion chains already work (e.g. Romance's "Exclusive" excluding
 // "Editor's Picks", which itself already excludes "Love On Top").
-func (service *DiscoverSectionService) resolveExcludedIDs(ctx context.Context, keys []string, excludeDepth int) (map[string]bool, error) {
+func (service *DiscoverSectionService) resolveExcludedIDs(ctx context.Context, keys []string, excludeDepth int, userID string) (map[string]bool, error) {
 	excludedIDs := map[string]bool{}
 	if excludeDepth <= 0 {
 		return excludedIDs, nil
@@ -428,7 +432,7 @@ func (service *DiscoverSectionService) resolveExcludedIDs(ctx context.Context, k
 		if err != nil {
 			continue // a renamed/deleted section key silently contributes nothing
 		}
-		novels, err := service.resolveSection(ctx, section, excludeSiblingLimit, excludeDepth-1)
+		novels, err := service.resolveSection(ctx, section, excludeSiblingLimit, excludeDepth-1, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -444,7 +448,7 @@ func (service *DiscoverSectionService) resolveExcludedIDs(ctx context.Context, k
 // global, multi_genre merge), just driven by data instead of Dart
 // constants. No overrides applied here — resolveSection layers those on
 // top.
-func (service *DiscoverSectionService) algorithmicFill(ctx context.Context, section *repository.DiscoverSection, limit int) ([]*repository.Novel, error) {
+func (service *DiscoverSectionService) algorithmicFill(ctx context.Context, section *repository.DiscoverSection, limit int, userID string) ([]*repository.Novel, error) {
 	baseFilter := repository.NovelListFilter{
 		Sort:     section.Sort,
 		Status:   section.StatusFilter,
@@ -475,7 +479,11 @@ func (service *DiscoverSectionService) algorithmicFill(ctx context.Context, sect
 			return []*repository.Novel{}, nil // renamed/deleted genre — silently nothing, same as elsewhere
 		}
 		filter := baseFilter
-		filter.GenreID = genreID
+		if section.Personalize {
+			filter = service.personalizeGenreFilter(ctx, filter, []string{genreID}, userID)
+		} else {
+			filter.GenreID = genreID
+		}
 		novels, _, err := service.novels.List(ctx, filter)
 		return novels, err
 
@@ -523,6 +531,50 @@ func (service *DiscoverSectionService) algorithmicFill(ctx context.Context, sect
 	default:
 		return []*repository.Novel{}, nil
 	}
+}
+
+// personalizeGenreFilter is the discover_sections analogue of
+// NovelService.PersonalizeFilter — merges a logged-in reader's own top
+// reading-history genres into filter as an "any of these" match
+// alongside sectionGenreIDs, reusing NovelListFilter's GenreIDs/
+// GenreMatchMode:"any" mechanism. Cannot reuse PersonalizeFilter
+// directly: that function is a no-op whenever filter.GenreID/GenreIDs is
+// already set, which is always true for a genre-scoped section.
+// NovelRepository.List ANDs GenreID and GenreIDs together rather than
+// ORing them, so to blend "section's genre" with "reader's top genres"
+// as one any-of set, the section's genre id has to go into GenreIDs
+// instead — GenreID is deliberately left empty. A guest, or a reader
+// with no history yet, gets just sectionGenreIDs back unfiltered by any
+// personal signal — same "nobody ever sees an empty section" fallback
+// PersonalizeFilter documents.
+func (service *DiscoverSectionService) personalizeGenreFilter(ctx context.Context, filter repository.NovelListFilter, sectionGenreIDs []string, userID string) repository.NovelListFilter {
+	filter.GenreID = ""
+	filter.GenreMatchMode = "any"
+	filter.GenreIDs = sectionGenreIDs
+	if userID == "" {
+		return filter
+	}
+	topGenreIDs, err := service.readingHistory.TopGenreIDs(ctx, userID, personalizationGenreCount)
+	if err != nil {
+		log.Printf("personalize section: could not load top genres for user %s: %v", userID, err)
+		return filter
+	}
+	seen := make(map[string]bool, len(sectionGenreIDs)+len(topGenreIDs))
+	merged := make([]string, 0, len(sectionGenreIDs)+len(topGenreIDs))
+	for _, id := range sectionGenreIDs {
+		if !seen[id] {
+			seen[id] = true
+			merged = append(merged, id)
+		}
+	}
+	for _, id := range topGenreIDs {
+		if !seen[id] {
+			seen[id] = true
+			merged = append(merged, id)
+		}
+	}
+	filter.GenreIDs = merged
+	return filter
 }
 
 func (service *DiscoverSectionService) genreIDByName(ctx context.Context, name string) (string, error) {
