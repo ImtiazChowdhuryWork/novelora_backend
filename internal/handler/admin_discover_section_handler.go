@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
@@ -17,10 +18,11 @@ import (
 type DiscoverSectionHandler struct {
 	sections    *service.DiscoverSectionService
 	auditLogger *audit.Logger
+	jwtSecret   []byte
 }
 
-func NewDiscoverSectionHandler(sections *service.DiscoverSectionService, auditLogger *audit.Logger) *DiscoverSectionHandler {
-	return &DiscoverSectionHandler{sections: sections, auditLogger: auditLogger}
+func NewDiscoverSectionHandler(sections *service.DiscoverSectionService, auditLogger *audit.Logger, jwtSecret []byte) *DiscoverSectionHandler {
+	return &DiscoverSectionHandler{sections: sections, auditLogger: auditLogger, jwtSecret: jwtSecret}
 }
 
 type discoverSectionResponse struct {
@@ -37,6 +39,7 @@ type discoverSectionResponse struct {
 	ExcludeSectionKeys []string `json:"exclude_section_keys"`
 	Position           int      `json:"position"`
 	Active             bool     `json:"active"`
+	Personalize        bool     `json:"personalize"`
 }
 
 func newDiscoverSectionResponse(section *repository.DiscoverSection) discoverSectionResponse {
@@ -54,6 +57,7 @@ func newDiscoverSectionResponse(section *repository.DiscoverSection) discoverSec
 		ExcludeSectionKeys: section.ExcludeSectionKeys,
 		Position:           section.Position,
 		Active:             section.Active,
+		Personalize:        section.Personalize,
 	}
 }
 
@@ -100,6 +104,7 @@ type discoverSectionWriteRequest struct {
 	ExcludeSectionKeys []string `json:"exclude_section_keys"`
 	Position           int      `json:"position"`
 	Active             bool     `json:"active"`
+	Personalize        bool     `json:"personalize"`
 }
 
 func (writeRequest discoverSectionWriteRequest) toWrite() repository.DiscoverSectionWrite {
@@ -116,6 +121,7 @@ func (writeRequest discoverSectionWriteRequest) toWrite() repository.DiscoverSec
 		ExcludeSectionKeys: writeRequest.ExcludeSectionKeys,
 		Position:           writeRequest.Position,
 		Active:             writeRequest.Active,
+		Personalize:        writeRequest.Personalize,
 	}
 }
 
@@ -244,7 +250,8 @@ func (handler *DiscoverSectionHandler) Novels(responseWriter http.ResponseWriter
 	if err != nil || page <= 0 {
 		page = 1
 	}
-	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), page, pageSize)
+	userID, _ := middleware.OptionalUserID(handler.jwtSecret, request)
+	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), page, pageSize, userID)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
@@ -261,9 +268,11 @@ const previewLimit = 20
 // Preview: GET /admin/discover-sections/{key}/preview — the actual
 // resolved novel list (algorithmic fill + overrides applied), so an
 // admin editing a section or an override can see the real effect
-// immediately instead of having to open the app.
+// immediately instead of having to open the app. Always unpersonalized
+// (empty userID) — a deterministic preview, not "preview as a specific
+// reader."
 func (handler *DiscoverSectionHandler) Preview(responseWriter http.ResponseWriter, request *http.Request) {
-	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), 1, previewLimit)
+	novels, err := handler.sections.Resolve(request.Context(), request.PathValue("key"), 1, previewLimit, "")
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return

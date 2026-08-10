@@ -88,7 +88,8 @@ func main() {
 	go runScheduledPublishTicker(chapterService)
 
 	discoverSectionService := service.NewDiscoverSectionService(
-		discoverSectionRepository, novelSectionOverrideRepository, novelRepository, genreRepository, eventHub)
+		discoverSectionRepository, novelSectionOverrideRepository, novelRepository, genreRepository,
+		readingHistoryRepository, eventHub)
 	readingHistoryService := service.NewReadingHistoryService(readingHistoryRepository, novelRepository, genreRepository)
 	novelCommentService := service.NewNovelCommentService(novelCommentRepository, novelRepository, eventHub)
 
@@ -108,7 +109,7 @@ func main() {
 	broadcastService := service.NewBroadcastService(deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	notificationHandler := handler.NewNotificationHandler(notificationRepository, broadcastService, auditLogger)
 	genreHandler := handler.NewGenreHandler(genreRepository, auditLogger)
-	discoverSectionHandler := handler.NewDiscoverSectionHandler(discoverSectionService, auditLogger)
+	discoverSectionHandler := handler.NewDiscoverSectionHandler(discoverSectionService, auditLogger, configuration.JWTSecret)
 	adminUserHandler := handler.NewAdminUserHandler(userRepository, auditLogger)
 	adminStatsHandler := handler.NewAdminStatsHandler(repository.NewStatsRepository(pool))
 	adminAuditLogHandler := handler.NewAdminAuditLogHandler(auditLogRepository)

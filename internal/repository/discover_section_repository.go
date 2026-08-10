@@ -30,6 +30,7 @@ type DiscoverSection struct {
 	ExcludeSectionKeys  []string
 	Position            int
 	Active              bool
+	Personalize         bool
 }
 
 // DiscoverSectionWrite is the mutable subset used by Create and Update.
@@ -46,6 +47,7 @@ type DiscoverSectionWrite struct {
 	ExcludeSectionKeys []string
 	Position           int
 	Active             bool
+	Personalize        bool
 }
 
 type DiscoverSectionRepository struct {
@@ -58,7 +60,7 @@ func NewDiscoverSectionRepository(pool *pgxpool.Pool) *DiscoverSectionRepository
 
 const discoverSectionColumns = `
 	key, category, label, layout, scope, genre_names, sort, status_filter,
-	recommended_filter, exclusive_filter, exclude_section_keys, position, active`
+	recommended_filter, exclusive_filter, exclude_section_keys, position, active, personalize`
 
 func scanDiscoverSection(row pgx.Row) (*DiscoverSection, error) {
 	section := &DiscoverSection{}
@@ -66,7 +68,7 @@ func scanDiscoverSection(row pgx.Row) (*DiscoverSection, error) {
 		&section.Key, &section.Category, &section.Label, &section.Layout, &section.Scope,
 		&section.GenreNames, &section.Sort, &section.StatusFilter,
 		&section.RecommendedFilter, &section.ExclusiveFilter, &section.ExcludeSectionKeys,
-		&section.Position, &section.Active,
+		&section.Position, &section.Active, &section.Personalize,
 	)
 	return section, err
 }
@@ -134,12 +136,12 @@ func (repository *DiscoverSectionRepository) Create(ctx context.Context, key str
 	section, err := scanDiscoverSection(repository.pool.QueryRow(ctx, `
 		INSERT INTO discover_sections
 			(key, category, label, layout, scope, genre_names, sort, status_filter,
-			 recommended_filter, exclusive_filter, exclude_section_keys, position, active)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			 recommended_filter, exclusive_filter, exclude_section_keys, position, active, personalize)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING `+discoverSectionColumns,
 		key, write.Category, write.Label, write.Layout, write.Scope, write.GenreNames,
 		write.Sort, write.StatusFilter, write.RecommendedFilter, write.ExclusiveFilter,
-		write.ExcludeSectionKeys, write.Position, write.Active))
+		write.ExcludeSectionKeys, write.Position, write.Active, write.Personalize))
 	if err != nil {
 		return nil, fmt.Errorf("insert discover section: %w", err)
 	}
@@ -151,12 +153,12 @@ func (repository *DiscoverSectionRepository) Update(ctx context.Context, key str
 		UPDATE discover_sections SET
 			category = $2, label = $3, layout = $4, scope = $5, genre_names = $6,
 			sort = $7, status_filter = $8, recommended_filter = $9, exclusive_filter = $10,
-			exclude_section_keys = $11, position = $12, active = $13, updated_at = now()
+			exclude_section_keys = $11, position = $12, active = $13, personalize = $14, updated_at = now()
 		WHERE key = $1
 		RETURNING `+discoverSectionColumns,
 		key, write.Category, write.Label, write.Layout, write.Scope, write.GenreNames,
 		write.Sort, write.StatusFilter, write.RecommendedFilter, write.ExclusiveFilter,
-		write.ExcludeSectionKeys, write.Position, write.Active))
+		write.ExcludeSectionKeys, write.Position, write.Active, write.Personalize))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrDiscoverSectionNotFound
 	}
