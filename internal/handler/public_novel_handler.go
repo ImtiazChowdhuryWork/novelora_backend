@@ -18,6 +18,7 @@ type PublicNovelHandler struct {
 	novelService   *service.NovelService
 	chapterService *service.ChapterService
 	readingHistory *service.ReadingHistoryService
+	reports        *service.NovelReportService
 	jwtSecret      []byte
 }
 
@@ -25,12 +26,14 @@ func NewPublicNovelHandler(
 	novelService *service.NovelService,
 	chapterService *service.ChapterService,
 	readingHistory *service.ReadingHistoryService,
+	reports *service.NovelReportService,
 	jwtSecret []byte,
 ) *PublicNovelHandler {
 	return &PublicNovelHandler{
 		novelService:   novelService,
 		chapterService: chapterService,
 		readingHistory: readingHistory,
+		reports:        reports,
 		jwtSecret:      jwtSecret,
 	}
 }
@@ -97,15 +100,17 @@ func (publicNovelHandler *PublicNovelHandler) List(responseWriter http.ResponseW
 // never List or the admin handler.
 type novelDetailResponse struct {
 	novelResponse
-	MyRating  *int `json:"my_rating"`
-	MySupport bool `json:"my_support"`
+	MyRating       *int `json:"my_rating"`
+	MySupport      bool `json:"my_support"`
+	IsReportedByMe bool `json:"is_reported_by_me"`
 }
 
-func newNovelDetailResponse(novel *repository.Novel, myRating *int, mySupport bool) novelDetailResponse {
+func newNovelDetailResponse(novel *repository.Novel, myRating *int, mySupport, isReportedByMe bool) novelDetailResponse {
 	return novelDetailResponse{
-		novelResponse: newNovelResponse(novel),
-		MyRating:      myRating,
-		MySupport:     mySupport,
+		novelResponse:  newNovelResponse(novel),
+		MyRating:       myRating,
+		MySupport:      mySupport,
+		IsReportedByMe: isReportedByMe,
 	}
 }
 
@@ -124,7 +129,7 @@ func (publicNovelHandler *PublicNovelHandler) Get(responseWriter http.ResponseWr
 	novel.ViewCount++
 
 	var myRating *int
-	var mySupport bool
+	var mySupport, isReportedByMe bool
 	if userID, ok := middleware.OptionalUserID(publicNovelHandler.jwtSecret, request); ok {
 		myRating, err = publicNovelHandler.novelService.GetUserRating(request.Context(), novelID, userID)
 		if err != nil {
@@ -136,8 +141,13 @@ func (publicNovelHandler *PublicNovelHandler) Get(responseWriter http.ResponseWr
 			writeServiceError(responseWriter, err)
 			return
 		}
+		isReportedByMe, err = publicNovelHandler.reports.HasReported(request.Context(), novelID, userID)
+		if err != nil {
+			writeServiceError(responseWriter, err)
+			return
+		}
 	}
-	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, mySupport))
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, mySupport, isReportedByMe))
 }
 
 type rateNovelRequest struct {
@@ -164,8 +174,13 @@ func (publicNovelHandler *PublicNovelHandler) Rate(responseWriter http.ResponseW
 		writeServiceError(responseWriter, err)
 		return
 	}
+	isReportedByMe, err := publicNovelHandler.reports.HasReported(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
 	myRating := body.Rating
-	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, &myRating, mySupport))
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, &myRating, mySupport, isReportedByMe))
 }
 
 // RemoveRating: DELETE /novels/{id}/rating — withdraws the caller's own
@@ -184,7 +199,12 @@ func (publicNovelHandler *PublicNovelHandler) RemoveRating(responseWriter http.R
 		writeServiceError(responseWriter, err)
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, nil, mySupport))
+	isReportedByMe, err := publicNovelHandler.reports.HasReported(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, nil, mySupport, isReportedByMe))
 }
 
 // Support: PUT /novels/{id}/support — a free "Support" tap (Phase 5d,
@@ -203,7 +223,12 @@ func (publicNovelHandler *PublicNovelHandler) Support(responseWriter http.Respon
 		writeServiceError(responseWriter, err)
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, true))
+	isReportedByMe, err := publicNovelHandler.reports.HasReported(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, true, isReportedByMe))
 }
 
 // Unsupport: DELETE /novels/{id}/support — withdraws the caller's own support.
@@ -221,7 +246,12 @@ func (publicNovelHandler *PublicNovelHandler) Unsupport(responseWriter http.Resp
 		writeServiceError(responseWriter, err)
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, false))
+	isReportedByMe, err := publicNovelHandler.reports.HasReported(request.Context(), novelID, userID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newNovelDetailResponse(novel, myRating, false, isReportedByMe))
 }
 
 // Chapters: GET /novels/{id}/chapters — published only, no content.

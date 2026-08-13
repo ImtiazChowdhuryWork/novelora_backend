@@ -33,6 +33,28 @@ func (repository *DeviceTokenRepository) Upsert(ctx context.Context, userID *str
 	return nil
 }
 
+// ListTokensForUser returns one account's registered device tokens —
+// the targeted counterpart of ListAllTokens, for pushes that must
+// reach exactly one reader (e.g. their report being reviewed).
+func (repository *DeviceTokenRepository) ListTokensForUser(ctx context.Context, userID string) ([]string, error) {
+	rows, err := repository.pool.Query(ctx,
+		"SELECT token FROM device_tokens WHERE user_id = $1", userID)
+	if err != nil {
+		return nil, fmt.Errorf("list device tokens for user: %w", err)
+	}
+	defer rows.Close()
+
+	tokens := []string{}
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			return nil, fmt.Errorf("scan device token: %w", err)
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens, rows.Err()
+}
+
 // ListAllTokens returns every registered device token. Novelora has no
 // per-novel "following" list yet, so a new chapter is broadcast to
 // every device — narrow this once readers can follow specific novels.

@@ -174,7 +174,8 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 		errors.Is(err, repository.ErrNotificationNotFound),
 		errors.Is(err, repository.ErrGenreNotFound),
 		errors.Is(err, repository.ErrDiscoverSectionNotFound),
-		errors.Is(err, repository.ErrCommentNotFound):
+		errors.Is(err, repository.ErrCommentNotFound),
+		errors.Is(err, repository.ErrReportNotFound):
 		writeError(responseWriter, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials),
 		errors.Is(err, service.ErrInvalidRefreshToken),
