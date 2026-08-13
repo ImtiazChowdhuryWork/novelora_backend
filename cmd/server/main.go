@@ -64,6 +64,8 @@ func main() {
 	novelRatingRepository := repository.NewNovelRatingRepository(pool)
 	novelCommentRepository := repository.NewNovelCommentRepository(pool)
 	novelSupportRepository := repository.NewNovelSupportRepository(pool)
+	novelReportRepository := repository.NewNovelReportRepository(pool)
+	authorStrikeRepository := repository.NewAuthorStrikeRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
 	auditLogger := audit.NewLogger(auditLogRepository)
 
@@ -92,6 +94,10 @@ func main() {
 		readingHistoryRepository, eventHub)
 	readingHistoryService := service.NewReadingHistoryService(readingHistoryRepository, novelRepository, genreRepository)
 	novelCommentService := service.NewNovelCommentService(novelCommentRepository, novelRepository, eventHub)
+	novelReportService := service.NewNovelReportService(
+		novelReportRepository, novelRepository, chapterRepository,
+		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
+	authorModerationService := service.NewAuthorModerationService(novelRepository, authorStrikeRepository, eventHub)
 
 	rankingNotificationService := service.NewRankingNotificationService(
 		discoverSectionService, sectionMembershipRepository,
@@ -104,8 +110,10 @@ func main() {
 		filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService, auditLogger)
-	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService, readingHistoryService, configuration.JWTSecret)
+	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService, readingHistoryService, novelReportService, configuration.JWTSecret)
 	novelCommentHandler := handler.NewNovelCommentHandler(novelCommentService, auditLogger, configuration.JWTSecret)
+	novelReportHandler := handler.NewNovelReportHandler(novelReportService, auditLogger, configuration.UploadsDirectory)
+	authorModerationHandler := handler.NewAuthorModerationHandler(authorModerationService, auditLogger)
 	broadcastService := service.NewBroadcastService(deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	notificationHandler := handler.NewNotificationHandler(notificationRepository, broadcastService, auditLogger)
 	genreHandler := handler.NewGenreHandler(genreRepository, auditLogger)
@@ -147,6 +155,8 @@ func main() {
 		configuration.JWTSecret, http.HandlerFunc(notificationHandler.MarkRead)))
 	mux.Handle("GET /api/v1/users/me/reading-history", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.ReadingHistory)))
+	mux.Handle("GET /api/v1/users/me/reports", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(novelReportHandler.Mine)))
 
 	// Uploaded files (avatars)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/",
@@ -183,6 +193,13 @@ func main() {
 	mux.Handle("DELETE /api/v1/comments/{id}", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(novelCommentHandler.Delete)))
 
+	// Reports (Book Detail's flag icon) — requires login, matching
+	// ratings/comments/support.
+	mux.Handle("POST /api/v1/novels/{id}/report", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(novelReportHandler.Create)))
+	mux.Handle("DELETE /api/v1/reports/{id}", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(novelReportHandler.Delete)))
+
 	// Admin: novels (JWT + admin role)
 	requireAdmin := func(handlerFunc http.HandlerFunc) http.Handler {
 		return middleware.Authenticate(configuration.JWTSecret,
@@ -201,6 +218,18 @@ func main() {
 	// Admin: comment moderation
 	mux.Handle("GET /api/v1/admin/novels/{id}/comments", requireAdmin(novelCommentHandler.List))
 	mux.Handle("DELETE /api/v1/admin/comments/{id}", requireAdmin(novelCommentHandler.AdminDelete))
+
+	// Admin: report moderation
+	mux.Handle("GET /api/v1/admin/reports", requireAdmin(novelReportHandler.List))
+	mux.Handle("GET /api/v1/admin/reports/{id}", requireAdmin(novelReportHandler.Get))
+	mux.Handle("PUT /api/v1/admin/reports/{id}/status", requireAdmin(novelReportHandler.UpdateStatus))
+
+	// Admin: author moderation (report detail view's author panel — see
+	// AuthorModerationService's doc comment on why this is name-keyed)
+	mux.Handle("GET /api/v1/admin/authors/{authorName}/novels", requireAdmin(authorModerationHandler.OtherNovels))
+	mux.Handle("GET /api/v1/admin/authors/{authorName}/strikes", requireAdmin(authorModerationHandler.Strikes))
+	mux.Handle("POST /api/v1/admin/authors/{authorName}/strikes", requireAdmin(authorModerationHandler.AddStrike))
+	mux.Handle("POST /api/v1/admin/authors/{authorName}/hide-novels", requireAdmin(authorModerationHandler.BulkHide))
 
 	// Admin: genres
 	mux.Handle("GET /api/v1/admin/genres", requireAdmin(genreHandler.List))

@@ -22,23 +22,23 @@ const minTrustedRatingCount = 3
 
 // Novel is a row in the novels table (soft-deleted rows are never returned).
 type Novel struct {
-	ID                string
-	Title             string
-	AuthorName        string
-	Synopsis          string
-	CoverURL          string
-	Status            string // "ongoing" | "completed"
-	IsShort           bool
-	IsRecommended     bool
-	IsExclusive       bool
-	Rating            *float64
+	ID            string
+	Title         string
+	AuthorName    string
+	Synopsis      string
+	CoverURL      string
+	Status        string // "ongoing" | "completed"
+	IsShort       bool
+	IsRecommended bool
+	IsExclusive   bool
+	Rating        *float64
 	// AverageRating and RatingCount are Phase 5b's real reader-rating
 	// aggregate, recomputed by NovelRatingRepository on every vote —
 	// AverageRating is on the same 0-10 scale as Rating (a 1-5 star vote
 	// doubled), so the two are directly comparable; see the "rating"
 	// sort case below for how they combine.
-	AverageRating     *float64
-	RatingCount       int
+	AverageRating *float64
+	RatingCount   int
 	// SupportCount is Phase 5d's free "Support" tap tally, recomputed by
 	// NovelSupportRepository on every add/remove — a like/favorite, not
 	// a monetary gift (see the plan's Phase 5d note).
@@ -422,4 +422,55 @@ func (repository *NovelRepository) SoftDelete(ctx context.Context, novelID strin
 		return ErrNovelNotFound
 	}
 	return nil
+}
+
+// ListByAuthorName is the admin report detail view's "other novels by
+// this author" panel — an exact, case-sensitive match against the same
+// free-text author_name every novel already carries (there's no
+// author-account system to join against instead). Newest first.
+func (repository *NovelRepository) ListByAuthorName(ctx context.Context, authorName string) ([]*Novel, error) {
+	rows, err := repository.pool.Query(ctx, `
+		SELECT `+novelColumns+`
+		FROM novels n
+		WHERE n.author_name = $1 AND n.deleted_at IS NULL
+		ORDER BY n.created_at DESC`, authorName)
+	if err != nil {
+		return nil, fmt.Errorf("list novels by author: %w", err)
+	}
+	defer rows.Close()
+
+	novels := []*Novel{}
+	for rows.Next() {
+		novel, err := scanNovel(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan novel: %w", err)
+		}
+		novels = append(novels, novel)
+	}
+	return novels, rows.Err()
+}
+
+// BulkHideByAuthorName soft-deletes every non-deleted novel by an
+// exact author-name match in one action — the admin "take action
+// against the author" bulk-hide button. Returns the ids that were
+// hidden, so the caller can publish a realtime "novel.deleted" event
+// per novel the same way a single-novel delete does.
+func (repository *NovelRepository) BulkHideByAuthorName(ctx context.Context, authorName string) ([]string, error) {
+	rows, err := repository.pool.Query(ctx,
+		"UPDATE novels SET deleted_at = now() WHERE author_name = $1 AND deleted_at IS NULL RETURNING id",
+		authorName)
+	if err != nil {
+		return nil, fmt.Errorf("bulk hide novels by author: %w", err)
+	}
+	defer rows.Close()
+
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan bulk-hidden novel id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

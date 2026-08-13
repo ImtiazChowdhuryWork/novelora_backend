@@ -16,6 +16,7 @@ type Stats struct {
 	TotalChapters     int
 	PublishedChapters int
 	TotalGenres       int
+	PendingReports    int
 }
 
 type StatsRepository struct {
@@ -34,9 +35,10 @@ func (repository *StatsRepository) Get(ctx context.Context) (*Stats, error) {
 			(SELECT count(*) FROM users),
 			(SELECT count(*) FROM chapters),
 			(SELECT count(*) FROM chapters WHERE status = 'published'),
-			(SELECT count(*) FROM genres)`,
+			(SELECT count(*) FROM genres),
+			(SELECT count(*) FROM novel_reports WHERE status = 'pending')`,
 	).Scan(&stats.TotalNovels, &stats.TotalUsers, &stats.TotalChapters,
-		&stats.PublishedChapters, &stats.TotalGenres)
+		&stats.PublishedChapters, &stats.TotalGenres, &stats.PendingReports)
 	if err != nil {
 		return nil, fmt.Errorf("get stats: %w", err)
 	}

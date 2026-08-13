@@ -33,6 +33,7 @@ func (adminStatsHandler *AdminStatsHandler) Get(responseWriter http.ResponseWrit
 		"total_chapters":     stats.TotalChapters,
 		"published_chapters": stats.PublishedChapters,
 		"total_genres":       stats.TotalGenres,
+		"pending_reports":    stats.PendingReports,
 	})
 }
 

@@ -75,6 +75,21 @@ func (repository *NotificationRepository) CreateBroadcastForAllUsers(ctx context
 	return nil
 }
 
+// CreateForUser writes a single targeted notification — unlike the
+// fan-out methods above, this reaches exactly one account. Used for
+// per-user events with no broadcast shape, e.g. "your report was
+// reviewed" (NovelReportService.UpdateStatus).
+func (repository *NotificationRepository) CreateForUser(ctx context.Context, userID, novelID, title, body string) error {
+	_, err := repository.pool.Exec(ctx, `
+		INSERT INTO notifications (user_id, novel_id, title, body)
+		VALUES ($1, $2, $3, $4)`,
+		userID, novelID, title, body)
+	if err != nil {
+		return fmt.Errorf("create user notification: %w", err)
+	}
+	return nil
+}
+
 // ListForUser returns the newest-first page for a user alongside the
 // total row count, for pagination.
 func (repository *NotificationRepository) ListForUser(ctx context.Context, userID string, page, pageSize int) ([]*Notification, int, error) {
