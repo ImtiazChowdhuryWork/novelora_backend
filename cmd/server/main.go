@@ -70,6 +70,7 @@ func main() {
 	authorStrikeRepository := repository.NewAuthorStrikeRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
 	auditLogger := audit.NewLogger(auditLogRepository)
+	outboxRepository := repository.NewOutboxRepository(pool)
 
 	var chapterNotifier push.Notifier = push.NoopNotifier{}
 	if configuration.FirebaseCredentialsPath != "" {
@@ -86,10 +87,15 @@ func main() {
 
 	novelService := service.NewNovelService(
 		novelRepository, genreRepository, novelRatingRepository, novelSupportRepository,
-		readingHistoryRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
+		readingHistoryRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub,
+		outboxRepository)
 	chapterService := service.NewChapterService(
-		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
+		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, chapterNotifier, eventHub,
+		outboxRepository)
 	go runScheduledPublishTicker(chapterService)
+
+	outboxProcessor := service.NewOutboxProcessor(outboxRepository, chapterService, novelService)
+	go runOutboxProcessorTicker(outboxProcessor)
 
 	discoverSectionService := service.NewDiscoverSectionService(
 		discoverSectionRepository, novelSectionOverrideRepository, novelRepository, genreRepository,
@@ -128,14 +134,20 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Rate limiting: a loose global limit wraps every route (set on the
+	// server below), plus a much stricter one on the credential-facing
+	// auth routes to blunt brute-force/credential-stuffing attempts.
+	globalRateLimiter := middleware.NewIPRateLimiter(300, 60)
+	authRateLimiter := middleware.NewIPRateLimiter(10, 5)
+
 	// Health check
 	mux.HandleFunc("GET /health", handler.Health)
 
 	// Auth (matches the Flutter app's ApiEndpoints)
-	mux.HandleFunc("POST /api/v1/auth/register", authHandler.Register)
-	mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)
-	mux.HandleFunc("POST /api/v1/auth/google", authHandler.GoogleLogin)
-	mux.HandleFunc("POST /api/v1/auth/refresh", authHandler.RefreshToken)
+	mux.Handle("POST /api/v1/auth/register", authRateLimiter.Middleware(http.HandlerFunc(authHandler.Register)))
+	mux.Handle("POST /api/v1/auth/login", authRateLimiter.Middleware(http.HandlerFunc(authHandler.Login)))
+	mux.Handle("POST /api/v1/auth/google", authRateLimiter.Middleware(http.HandlerFunc(authHandler.GoogleLogin)))
+	mux.Handle("POST /api/v1/auth/refresh", authRateLimiter.Middleware(http.HandlerFunc(authHandler.RefreshToken)))
 	mux.HandleFunc("POST /api/v1/auth/logout", authHandler.Logout)
 
 	// Users (require a valid access token)
@@ -305,7 +317,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    ":" + configuration.Port,
-		Handler: middleware.RequestLogger(mux),
+		Handler: middleware.RequestLogger(globalRateLimiter.Middleware(mux)),
 	}
 
 	log.Printf("novelora_backend listening on :%s", configuration.Port)
@@ -344,6 +356,23 @@ func runRankingDetectionTicker(rankingService *service.RankingNotificationServic
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		rankingService.DetectAndNotify(ctx)
+		cancel()
+	}
+}
+
+// runOutboxProcessorTicker drains durably-queued notifications (see
+// OutboxProcessor) every few seconds. Short interval and short per-tick
+// timeout are deliberate: this is the replacement for what used to be
+// an instant fire-and-forget goroutine, so a long poll interval would
+// be a regression in how quickly readers actually get notified.
+func runOutboxProcessorTicker(processor *service.OutboxProcessor) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if _, err := processor.ProcessBatch(ctx); err != nil {
+			log.Printf("outbox: process batch failed: %v", err)
+		}
 		cancel()
 	}
 }

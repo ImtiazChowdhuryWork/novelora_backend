@@ -22,3 +22,6 @@ coverage.html
 
 # Uploaded files
 /uploads/
+
+# Local backup output (see scripts/backup.sh)
+/backups/

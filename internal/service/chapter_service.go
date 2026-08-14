@@ -26,6 +26,7 @@ type ChapterService struct {
 	notifications *repository.NotificationRepository
 	notifier      push.Notifier
 	events        realtime.Publisher
+	outbox        *repository.OutboxRepository
 }
 
 func NewChapterService(
@@ -35,6 +36,7 @@ func NewChapterService(
 	notifications *repository.NotificationRepository,
 	notifier push.Notifier,
 	events realtime.Publisher,
+	outbox *repository.OutboxRepository,
 ) *ChapterService {
 	return &ChapterService{
 		chapters:      chapters,
@@ -43,6 +45,7 @@ func NewChapterService(
 		notifications: notifications,
 		notifier:      notifier,
 		events:        events,
+		outbox:        outbox,
 	}
 }
 
@@ -188,7 +191,9 @@ func (chapterService *ChapterService) UpdateStatus(ctx context.Context, chapterI
 	chapterTopic := "chapter.updated"
 	if status == "published" {
 		chapterTopic = "chapter.published"
-		go chapterService.notifyNewChapterPublished(chapter)
+		if err := chapterService.outbox.Enqueue(ctx, "chapter.published", chapterPublishedPayload{ChapterID: chapter.ID}); err != nil {
+			log.Printf("outbox: could not enqueue chapter.published for %s: %v", chapter.ID, err)
+		}
 	}
 	chapterService.publishChapterChangedEvents(chapter.NovelID, chapterTopic)
 	return chapter, nil
@@ -243,21 +248,42 @@ func (chapterService *ChapterService) PublishDueScheduled(ctx context.Context) (
 	return len(due), nil
 }
 
-// notifyNewChapterPublished runs on its own timeout-bounded context —
-// never the request's — so a slow or failing push provider can't delay
-// or fail the publish response. Runs after UpdateStatus already
-// committed, so the notification always reflects a real state change.
-// Populates both delivery paths: the FCM push (device tray) and the
-// in-app inbox (notifications table) — independently, so a failure in
-// one doesn't skip the other.
-func (chapterService *ChapterService) notifyNewChapterPublished(chapter *repository.Chapter) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+// chapterPublishedPayload is the outbox payload for a "chapter.published"
+// event — just enough to re-fetch fresh state at delivery time, since
+// the chapter/novel could change between enqueue and delivery.
+type chapterPublishedPayload struct {
+	ChapterID string `json:"chapter_id"`
+}
+
+// DeliverChapterPublishedNotification is called by the outbox processor
+// (see OutboxProcessor), never directly from the request path — that's
+// what makes it durable: it survives a process crash between the
+// publish committing and the notification actually going out, unlike
+// the fire-and-forget goroutine this replaced. Populates both delivery
+// paths: the FCM push (device tray) and the in-app inbox (notifications
+// table) — independently, so a failure in one doesn't skip the other.
+func (chapterService *ChapterService) DeliverChapterPublishedNotification(ctx context.Context, payload []byte) error {
+	var decoded chapterPublishedPayload
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return fmt.Errorf("unmarshal chapter.published payload: %w", err)
+	}
+
+	chapter, err := chapterService.chapters.GetByID(ctx, decoded.ChapterID)
+	if err != nil {
+		if err == repository.ErrChapterNotFound {
+			log.Printf("outbox: chapter %s no longer exists, skipping notification", decoded.ChapterID)
+			return nil
+		}
+		return fmt.Errorf("load chapter %s: %w", decoded.ChapterID, err)
+	}
 
 	novel, err := chapterService.novels.GetByID(ctx, chapter.NovelID)
 	if err != nil {
-		log.Printf("push: could not load novel %s for notification: %v", chapter.NovelID, err)
-		return
+		if err == repository.ErrNovelNotFound {
+			log.Printf("outbox: novel %s no longer exists, skipping notification", chapter.NovelID)
+			return nil
+		}
+		return fmt.Errorf("load novel %s: %w", chapter.NovelID, err)
 	}
 
 	tokens, err := chapterService.deviceTokens.ListAllTokens(ctx)
@@ -272,10 +298,10 @@ func (chapterService *ChapterService) notifyNewChapterPublished(chapter *reposit
 		body += ": " + chapter.Title
 	}
 	if err := chapterService.notifications.CreateForAllUsers(ctx, novel.ID, chapter.ID, novel.Title, body); err != nil {
-		log.Printf("inbox: could not create notifications for chapter %s: %v", chapter.ID, err)
-		return
+		return fmt.Errorf("create inbox notifications for chapter %s: %w", chapter.ID, err)
 	}
 	chapterService.events.Publish(realtime.Event{Topic: "notification.new"})
+	return nil
 }
 
 func (chapterService *ChapterService) Delete(ctx context.Context, chapterID string) error {
