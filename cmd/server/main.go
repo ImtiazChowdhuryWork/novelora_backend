@@ -105,7 +105,7 @@ func main() {
 	novelReportService := service.NewNovelReportService(
 		novelReportRepository, novelRepository, chapterRepository,
 		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
-	authorModerationService := service.NewAuthorModerationService(novelRepository, authorStrikeRepository, eventHub)
+	authorModerationService := service.NewAuthorModerationService(novelRepository, authorStrikeRepository, novelReportRepository, eventHub)
 
 	rankingNotificationService := service.NewRankingNotificationService(
 		discoverSectionService, sectionMembershipRepository,
@@ -155,6 +155,8 @@ func main() {
 		configuration.JWTSecret, http.HandlerFunc(userHandler.CurrentUser)))
 	mux.Handle("POST /api/v1/users/me/author-profile", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(authHandler.BecomeAuthor)))
+	mux.Handle("PUT /api/v1/users/me/author-profile", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(userHandler.UpdateAuthorProfile)))
 	mux.Handle("PUT /api/v1/users/me/avatar", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.UpdateAvatar)))
 	mux.Handle("DELETE /api/v1/users/me/avatar", middleware.Authenticate(
@@ -229,6 +231,7 @@ func main() {
 	mux.Handle("GET /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Get))
 	mux.Handle("PUT /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}", requireAdmin(adminNovelHandler.Delete))
+	mux.Handle("POST /api/v1/admin/novels/{id}/restore", requireAdmin(adminNovelHandler.Restore))
 	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
 	mux.Handle("GET /api/v1/admin/novels/{id}/ratings", requireAdmin(adminNovelHandler.Ratings))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}/ratings/{userId}", requireAdmin(adminNovelHandler.DeleteRating))
@@ -245,13 +248,17 @@ func main() {
 	mux.Handle("GET /api/v1/author/novels/{id}", requireAuthor(authorNovelHandler.Get))
 	mux.Handle("PUT /api/v1/author/novels/{id}", requireAuthor(authorNovelHandler.Update))
 	mux.Handle("PUT /api/v1/author/novels/{id}/cover", requireAuthor(authorNovelHandler.UpdateCover))
+	mux.Handle("DELETE /api/v1/author/novels/{id}", requireAuthor(authorNovelHandler.Delete))
 	mux.Handle("GET /api/v1/author/novels/{id}/chapters", requireAuthor(authorChapterHandler.ListByNovel))
 	mux.Handle("POST /api/v1/author/novels/{id}/chapters", requireAuthor(authorChapterHandler.Create))
+	mux.Handle("POST /api/v1/author/novels/{id}/chapters/import", requireAuthor(authorChapterHandler.Import))
 	mux.Handle("GET /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Get))
 	mux.Handle("PUT /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Update))
 	mux.Handle("PUT /api/v1/author/chapters/{id}/status", requireAuthor(authorChapterHandler.UpdateStatus))
 	mux.Handle("PUT /api/v1/author/chapters/{id}/schedule", requireAuthor(authorChapterHandler.Schedule))
 	mux.Handle("DELETE /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Delete))
+	mux.Handle("GET /api/v1/author/reports", requireAuthor(novelReportHandler.ListForOwner))
+	mux.Handle("POST /api/v1/author/reports/{id}/resubmit", requireAuthor(novelReportHandler.Resubmit))
 
 	// Admin: comment moderation
 	mux.Handle("GET /api/v1/admin/novels/{id}/comments", requireAdmin(novelCommentHandler.List))
@@ -268,6 +275,7 @@ func main() {
 	mux.Handle("GET /api/v1/admin/authors/{authorName}/strikes", requireAdmin(authorModerationHandler.Strikes))
 	mux.Handle("POST /api/v1/admin/authors/{authorName}/strikes", requireAdmin(authorModerationHandler.AddStrike))
 	mux.Handle("POST /api/v1/admin/authors/{authorName}/hide-novels", requireAdmin(authorModerationHandler.BulkHide))
+	mux.Handle("GET /api/v1/admin/authors/{authorName}/reports", requireAdmin(authorModerationHandler.Reports))
 
 	// Admin: genres
 	mux.Handle("GET /api/v1/admin/genres", requireAdmin(genreHandler.List))

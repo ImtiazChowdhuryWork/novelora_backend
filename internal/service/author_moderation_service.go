@@ -12,23 +12,33 @@ const maxStrikeNoteLength = 1000
 
 // AuthorModerationService backs the admin report detail view's author
 // panel: an author's other novels, their strike history, adding a
-// strike, and bulk-hiding every novel by that name. Everything here is
-// keyed by the free-text author_name novels already carry — see the
-// migration's comment on why (no author-account system yet).
+// strike, and bulk-hiding every novel by that name. Every method takes
+// both the free-text authorName every novel carries AND an optional
+// ownerUserID — when the reported novel has a real account (migration
+// 0030), ownerUserID is non-nil and every query uses the account-keyed
+// path instead; admin-uploaded/unclaimed novels (still the common
+// case) keep working exactly as before via the name-keyed fallback.
 type AuthorModerationService struct {
 	novels  *repository.NovelRepository
 	strikes *repository.AuthorStrikeRepository
+	reports *repository.NovelReportRepository
 	events  realtime.Publisher
 }
 
-func NewAuthorModerationService(novels *repository.NovelRepository, strikes *repository.AuthorStrikeRepository, events realtime.Publisher) *AuthorModerationService {
-	return &AuthorModerationService{novels: novels, strikes: strikes, events: events}
+func NewAuthorModerationService(novels *repository.NovelRepository, strikes *repository.AuthorStrikeRepository, reports *repository.NovelReportRepository, events realtime.Publisher) *AuthorModerationService {
+	return &AuthorModerationService{novels: novels, strikes: strikes, reports: reports, events: events}
 }
 
 // OtherNovels lists an author's catalog, excluding the novel the admin
 // was already looking at (the one on the report being reviewed).
-func (service *AuthorModerationService) OtherNovels(ctx context.Context, authorName, excludeNovelID string) ([]*repository.Novel, error) {
-	novels, err := service.novels.ListByAuthorName(ctx, authorName)
+func (service *AuthorModerationService) OtherNovels(ctx context.Context, authorName string, ownerUserID *string, excludeNovelID string) ([]*repository.Novel, error) {
+	var novels []*repository.Novel
+	var err error
+	if ownerUserID != nil {
+		novels, err = service.novels.ListByOwnerUserID(ctx, *ownerUserID)
+	} else {
+		novels, err = service.novels.ListByAuthorName(ctx, authorName)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -41,11 +51,24 @@ func (service *AuthorModerationService) OtherNovels(ctx context.Context, authorN
 	return filtered, nil
 }
 
-func (service *AuthorModerationService) Strikes(ctx context.Context, authorName string) ([]*repository.AuthorStrike, error) {
+func (service *AuthorModerationService) Strikes(ctx context.Context, authorName string, ownerUserID *string) ([]*repository.AuthorStrike, error) {
+	if ownerUserID != nil {
+		return service.strikes.ListForOwner(ctx, *ownerUserID)
+	}
 	return service.strikes.ListForAuthor(ctx, authorName)
 }
 
-func (service *AuthorModerationService) AddStrike(ctx context.Context, authorName, note, adminID string) (*repository.AuthorStrike, error) {
+// Reports is the report-history section of the report detail drawer —
+// every past report against this author's catalog, so the admin can
+// see patterns before acting.
+func (service *AuthorModerationService) Reports(ctx context.Context, authorName string, ownerUserID *string) ([]*repository.NovelReport, error) {
+	if ownerUserID != nil {
+		return service.reports.ListForOwnerAll(ctx, *ownerUserID)
+	}
+	return service.reports.ListForAuthorName(ctx, authorName)
+}
+
+func (service *AuthorModerationService) AddStrike(ctx context.Context, authorName string, ownerUserID *string, note, adminID string) (*repository.AuthorStrike, error) {
 	note = strings.TrimSpace(note)
 	if note == "" {
 		return nil, &ValidationError{Message: "strike note cannot be empty"}
@@ -53,17 +76,24 @@ func (service *AuthorModerationService) AddStrike(ctx context.Context, authorNam
 	if len(note) > maxStrikeNoteLength {
 		return nil, &ValidationError{Message: "strike note too long"}
 	}
-	return service.strikes.Create(ctx, authorName, note, adminID)
+	return service.strikes.Create(ctx, authorName, ownerUserID, note, adminID)
 }
 
 // BulkHide is the "take action against the author" enforcement path —
-// hides every novel by this author name in one action, publishing the
-// same "novel.deleted" event a single-novel delete does for each one
-// (see NovelService.Delete) so the app and dashboard both refresh.
-// Returns how many were hidden (0 is valid: every novel by this name
-// was already hidden, or the name never had any).
-func (service *AuthorModerationService) BulkHide(ctx context.Context, authorName string) (int, error) {
-	ids, err := service.novels.BulkHideByAuthorName(ctx, authorName)
+// hides every novel by this author (account-keyed when available,
+// name-keyed otherwise) in one action, publishing the same
+// "novel.deleted" event a single-novel delete does for each one (see
+// NovelService.Delete) so the app and dashboard both refresh. Returns
+// how many were hidden (0 is valid: everything was already hidden, or
+// there was nothing to hide).
+func (service *AuthorModerationService) BulkHide(ctx context.Context, authorName string, ownerUserID *string) (int, error) {
+	var ids []string
+	var err error
+	if ownerUserID != nil {
+		ids, err = service.novels.BulkHideByOwnerUserID(ctx, *ownerUserID)
+	} else {
+		ids, err = service.novels.BulkHideByAuthorName(ctx, authorName)
+	}
 	if err != nil {
 		return 0, err
 	}

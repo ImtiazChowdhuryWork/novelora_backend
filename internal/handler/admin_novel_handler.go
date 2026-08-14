@@ -215,6 +215,27 @@ func (adminNovelHandler *AdminNovelHandler) Delete(responseWriter http.ResponseW
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
+// Restore: POST /admin/novels/{id}/restore — reverses Delete. Fetches
+// the novel *after* restoring (Get's own deleted_at IS NULL filter
+// would otherwise 404 on a still-hidden novel), same reasoning Delete
+// uses in reverse.
+func (adminNovelHandler *AdminNovelHandler) Restore(responseWriter http.ResponseWriter, request *http.Request) {
+	novelID := request.PathValue("id")
+	if err := adminNovelHandler.novelService.Restore(request.Context(), novelID); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	novel, err := adminNovelHandler.novelService.Get(request.Context(), novelID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	adminNovelHandler.auditLogger.Log(actorID, actorName, "novel.restored", "novel", novelID,
+		map[string]any{"title": novel.Title})
+	writeJSON(responseWriter, http.StatusOK, newNovelResponse(novel))
+}
+
 type novelPositionRequest struct {
 	ID        string `json:"id"`
 	SortOrder int    `json:"sort_order"`
