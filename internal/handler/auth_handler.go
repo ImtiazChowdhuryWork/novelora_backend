@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
 )
@@ -37,12 +38,18 @@ type googleLoginRequest struct {
 	IDToken string `json:"id_token"`
 }
 
+type becomeAuthorRequest struct {
+	PenName string `json:"pen_name"`
+}
+
 type userResponse struct {
 	ID        string    `json:"id"`
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
 	AvatarURL string    `json:"avatar_url"`
 	Role      string    `json:"role"`
+	IsAuthor  bool      `json:"is_author"`
+	PenName   string    `json:"pen_name"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -54,6 +61,10 @@ type authResponse struct {
 }
 
 func newAuthResponse(result *service.AuthResult) authResponse {
+	penName := ""
+	if result.AuthorProfile != nil {
+		penName = result.AuthorProfile.PenName
+	}
 	return authResponse{
 		User: userResponse{
 			ID:        result.User.ID,
@@ -61,6 +72,8 @@ func newAuthResponse(result *service.AuthResult) authResponse {
 			Email:     result.User.Email,
 			AvatarURL: result.User.AvatarURL,
 			Role:      result.User.Role,
+			IsAuthor:  result.AuthorProfile != nil,
+			PenName:   penName,
 			CreatedAt: result.User.CreatedAt,
 		},
 		AccessToken:  result.AccessToken,
@@ -135,6 +148,26 @@ func (authHandler *AuthHandler) RefreshToken(responseWriter http.ResponseWriter,
 	writeJSON(responseWriter, http.StatusOK, newAuthResponse(result))
 }
 
+// BecomeAuthor upgrades the caller's account with an author profile —
+// both the "opt in from an existing account" and "sign up then
+// immediately become an author" paths call this. Requires the
+// Authenticate middleware (not RequireAuthor — this is how you become
+// one).
+func (authHandler *AuthHandler) BecomeAuthor(responseWriter http.ResponseWriter, request *http.Request) {
+	var requestBody becomeAuthorRequest
+	if !decodeJSON(responseWriter, request, &requestBody) {
+		return
+	}
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+
+	result, err := authHandler.authService.BecomeAuthor(request.Context(), userID, requestBody.PenName)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusCreated, newAuthResponse(result))
+}
+
 // Logout revokes the presented refresh token.
 func (authHandler *AuthHandler) Logout(responseWriter http.ResponseWriter, request *http.Request) {
 	var requestBody refreshRequest
@@ -167,7 +200,8 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 		writeError(responseWriter, http.StatusBadRequest, validationError.Message)
 	case errors.Is(err, repository.ErrEmailTaken),
 		errors.Is(err, repository.ErrUsernameTaken),
-		errors.Is(err, repository.ErrGenreNameTaken):
+		errors.Is(err, repository.ErrGenreNameTaken),
+		errors.Is(err, repository.ErrAuthorProfileExists):
 		writeError(responseWriter, http.StatusConflict, err.Error())
 	case errors.Is(err, repository.ErrNovelNotFound),
 		errors.Is(err, repository.ErrChapterNotFound),

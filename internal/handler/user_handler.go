@@ -14,6 +14,7 @@ type UserHandler struct {
 	users            *repository.UserRepository
 	deviceTokens     *repository.DeviceTokenRepository
 	readingHistory   *service.ReadingHistoryService
+	authorProfiles   *repository.AuthorProfileRepository
 	jwtSecret        []byte
 	avatarsDirectory string
 	avatarsUrlPrefix string
@@ -23,6 +24,7 @@ func NewUserHandler(
 	users *repository.UserRepository,
 	deviceTokens *repository.DeviceTokenRepository,
 	readingHistory *service.ReadingHistoryService,
+	authorProfiles *repository.AuthorProfileRepository,
 	jwtSecret []byte,
 	avatarsDirectory string,
 ) *UserHandler {
@@ -30,6 +32,7 @@ func NewUserHandler(
 		users:            users,
 		deviceTokens:     deviceTokens,
 		readingHistory:   readingHistory,
+		authorProfiles:   authorProfiles,
 		jwtSecret:        jwtSecret,
 		avatarsDirectory: avatarsDirectory,
 		avatarsUrlPrefix: "/uploads/avatars/",
@@ -141,12 +144,23 @@ func (userHandler *UserHandler) respondWithUser(responseWriter http.ResponseWrit
 		return
 	}
 
+	penName := ""
+	authorProfile, err := userHandler.authorProfiles.GetByUserID(request.Context(), userID)
+	if err == nil {
+		penName = authorProfile.PenName
+	} else if !errors.Is(err, repository.ErrAuthorProfileNotFound) {
+		userHandler.internalError(responseWriter, err)
+		return
+	}
+
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"id":         user.ID,
 		"username":   user.Username,
 		"email":      user.Email,
 		"avatar_url": user.AvatarURL,
 		"role":       user.Role,
+		"is_author":  penName != "",
+		"pen_name":   penName,
 		"created_at": user.CreatedAt,
 	})
 }

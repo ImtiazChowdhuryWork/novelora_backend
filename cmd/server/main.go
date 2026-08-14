@@ -39,6 +39,7 @@ func main() {
 
 	userRepository := repository.NewUserRepository(pool)
 	refreshTokenRepository := repository.NewRefreshTokenRepository(pool)
+	authorProfileRepository := repository.NewAuthorProfileRepository(pool)
 
 	eventHub := realtime.NewHub()
 	go eventHub.Run()
@@ -46,6 +47,7 @@ func main() {
 	authService := service.NewAuthService(
 		userRepository,
 		refreshTokenRepository,
+		authorProfileRepository,
 		eventHub,
 		configuration.JWTSecret,
 		configuration.AccessTokenTTL,
@@ -106,10 +108,12 @@ func main() {
 
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(
-		userRepository, deviceTokenRepository, readingHistoryService, configuration.JWTSecret,
+		userRepository, deviceTokenRepository, readingHistoryService, authorProfileRepository, configuration.JWTSecret,
 		filepath.Join(configuration.UploadsDirectory, "avatars"))
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService, auditLogger)
+	authorNovelHandler := handler.NewAuthorNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
+	authorChapterHandler := handler.NewAuthorChapterHandler(chapterService, novelService, auditLogger)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService, readingHistoryService, novelReportService, configuration.JWTSecret)
 	novelCommentHandler := handler.NewNovelCommentHandler(novelCommentService, auditLogger, configuration.JWTSecret)
 	novelReportHandler := handler.NewNovelReportHandler(novelReportService, auditLogger, configuration.UploadsDirectory)
@@ -137,6 +141,8 @@ func main() {
 	// Users (require a valid access token)
 	mux.Handle("GET /api/v1/users/me", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.CurrentUser)))
+	mux.Handle("POST /api/v1/users/me/author-profile", middleware.Authenticate(
+		configuration.JWTSecret, http.HandlerFunc(authHandler.BecomeAuthor)))
 	mux.Handle("PUT /api/v1/users/me/avatar", middleware.Authenticate(
 		configuration.JWTSecret, http.HandlerFunc(userHandler.UpdateAvatar)))
 	mux.Handle("DELETE /api/v1/users/me/avatar", middleware.Authenticate(
@@ -214,6 +220,26 @@ func main() {
 	mux.Handle("PUT /api/v1/admin/novels/{id}/cover", requireAdmin(adminNovelHandler.UpdateCover))
 	mux.Handle("GET /api/v1/admin/novels/{id}/ratings", requireAdmin(adminNovelHandler.Ratings))
 	mux.Handle("DELETE /api/v1/admin/novels/{id}/ratings/{userId}", requireAdmin(adminNovelHandler.DeleteRating))
+
+	// Author: own novels/chapters (JWT + author capability — see
+	// middleware.RequireAuthor's doc comment on why this checks a
+	// capability flag, not the mutually-exclusive role value)
+	requireAuthor := func(handlerFunc http.HandlerFunc) http.Handler {
+		return middleware.Authenticate(configuration.JWTSecret,
+			middleware.RequireAuthor(handlerFunc))
+	}
+	mux.Handle("GET /api/v1/author/novels", requireAuthor(authorNovelHandler.List))
+	mux.Handle("POST /api/v1/author/novels", requireAuthor(authorNovelHandler.Create))
+	mux.Handle("GET /api/v1/author/novels/{id}", requireAuthor(authorNovelHandler.Get))
+	mux.Handle("PUT /api/v1/author/novels/{id}", requireAuthor(authorNovelHandler.Update))
+	mux.Handle("PUT /api/v1/author/novels/{id}/cover", requireAuthor(authorNovelHandler.UpdateCover))
+	mux.Handle("GET /api/v1/author/novels/{id}/chapters", requireAuthor(authorChapterHandler.ListByNovel))
+	mux.Handle("POST /api/v1/author/novels/{id}/chapters", requireAuthor(authorChapterHandler.Create))
+	mux.Handle("GET /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Get))
+	mux.Handle("PUT /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Update))
+	mux.Handle("PUT /api/v1/author/chapters/{id}/status", requireAuthor(authorChapterHandler.UpdateStatus))
+	mux.Handle("PUT /api/v1/author/chapters/{id}/schedule", requireAuthor(authorChapterHandler.Schedule))
+	mux.Handle("DELETE /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Delete))
 
 	// Admin: comment moderation
 	mux.Handle("GET /api/v1/admin/novels/{id}/comments", requireAdmin(novelCommentHandler.List))

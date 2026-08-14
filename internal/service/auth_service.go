@@ -46,6 +46,7 @@ const (
 type AuthService struct {
 	users           *repository.UserRepository
 	refreshTokens   *repository.RefreshTokenRepository
+	authorProfiles  *repository.AuthorProfileRepository
 	events          realtime.Publisher
 	jwtSecret       []byte
 	accessTokenTTL  time.Duration
@@ -56,6 +57,7 @@ type AuthService struct {
 func NewAuthService(
 	users *repository.UserRepository,
 	refreshTokens *repository.RefreshTokenRepository,
+	authorProfiles *repository.AuthorProfileRepository,
 	events realtime.Publisher,
 	jwtSecret []byte,
 	accessTokenTTL time.Duration,
@@ -65,6 +67,7 @@ func NewAuthService(
 	return &AuthService{
 		users:           users,
 		refreshTokens:   refreshTokens,
+		authorProfiles:  authorProfiles,
 		events:          events,
 		jwtSecret:       jwtSecret,
 		accessTokenTTL:  accessTokenTTL,
@@ -75,10 +78,38 @@ func NewAuthService(
 
 // AuthResult is what a successful register/login/refresh returns.
 type AuthResult struct {
-	User         *repository.User
-	AccessToken  string
-	RefreshToken string
-	ExpiresIn    int64 // access-token lifetime in seconds
+	User          *repository.User
+	AuthorProfile *repository.AuthorProfile // nil when the user isn't an author
+	AccessToken   string
+	RefreshToken  string
+	ExpiresIn     int64 // access-token lifetime in seconds
+}
+
+const maxPenNameLength = 100
+
+// BecomeAuthor is the "become an author" upgrade — both the
+// already-logged-in-reader-opts-in path and the direct-signup path
+// (register, then call this immediately) funnel through here. Reuses
+// issueTokens so the caller gets a fresh is_author:true access token
+// without a separate re-login.
+func (authService *AuthService) BecomeAuthor(ctx context.Context, userID, penName string) (*AuthResult, error) {
+	penName = strings.TrimSpace(penName)
+	if penName == "" {
+		return nil, &ValidationError{Message: "pen name is required"}
+	}
+	if len(penName) > maxPenNameLength {
+		return nil, &ValidationError{Message: fmt.Sprintf("pen name must be at most %d characters", maxPenNameLength)}
+	}
+
+	if _, err := authService.authorProfiles.Create(ctx, userID, penName); err != nil {
+		return nil, err
+	}
+
+	user, err := authService.users.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return authService.issueTokens(ctx, user)
 }
 
 func (authService *AuthService) Register(ctx context.Context, username, email, password string) (*AuthResult, error) {
@@ -274,14 +305,22 @@ func (authService *AuthService) issueTokens(ctx context.Context, user *repositor
 	if user.IsBanned {
 		return nil, ErrAccountBanned
 	}
+
+	authorProfile, err := authService.authorProfiles.GetByUserID(ctx, user.ID)
+	if err != nil && !errors.Is(err, repository.ErrAuthorProfileNotFound) {
+		return nil, err
+	}
+	isAuthor := authorProfile != nil
+
 	now := time.Now()
 
 	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":  user.ID,
-		"name": user.Username,
-		"role": user.Role,
-		"iat":  now.Unix(),
-		"exp":  now.Add(authService.accessTokenTTL).Unix(),
+		"sub":       user.ID,
+		"name":      user.Username,
+		"role":      user.Role,
+		"is_author": isAuthor,
+		"iat":       now.Unix(),
+		"exp":       now.Add(authService.accessTokenTTL).Unix(),
 	}).SignedString(authService.jwtSecret)
 	if err != nil {
 		return nil, fmt.Errorf("sign access token: %w", err)
@@ -299,10 +338,11 @@ func (authService *AuthService) issueTokens(ctx context.Context, user *repositor
 	}
 
 	return &AuthResult{
-		User:         user,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ExpiresIn:    int64(authService.accessTokenTTL.Seconds()),
+		User:          user,
+		AuthorProfile: authorProfile,
+		AccessToken:   accessToken,
+		RefreshToken:  refreshToken,
+		ExpiresIn:     int64(authService.accessTokenTTL.Seconds()),
 	}, nil
 }
 
