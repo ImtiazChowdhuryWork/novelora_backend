@@ -45,6 +45,14 @@ If the local Postgres Windows service can't start without admin rights, run it d
 & "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" start -D "C:\Program Files\PostgreSQL\17\data"
 ```
 
+### Running tests
+
+```bash
+go test ./...
+```
+
+Tests using `internal/testsupport` are integration tests against the real dev database from step 1/2 above — they create their own throwaway rows (unique per run) and clean up after themselves via `t.Cleanup`, but they do need that database up and reachable. A test skips itself (not a failure) if `DATABASE_URL`/`JWT_SECRET` aren't resolvable.
+
 ## Endpoints
 
 | Method | Path                    | Status | Notes                                        |
@@ -136,4 +144,4 @@ Three independent triggers, all broadcasting to every registered device token (n
 - [x] **Author accounts, Phase 1 (migration `0030`, 2026-08-14):** "author" is an additive capability, not a role swap — `users.role` stays `reader`/`admin` untouched; a new `author_profiles` table is the source of truth, surfaced as an `is_author` JWT claim (alongside the existing `role` claim) and a new `RequireAuthor` middleware. `POST /users/me/author-profile` is the "become an author" upgrade (reissues tokens immediately via the existing `issueTokens`, so `is_author` flips without a re-login) — both the opt-in-from-an-existing-account and direct-signup (register, then this) paths use it, no separate registration endpoint needed. `novels` gained a nullable `owner_user_id` (every existing admin-uploaded novel stays `NULL`, `author_name` untouched either way); new author-scoped `/api/v1/author/novels...`/`/api/v1/author/chapters...` endpoints reuse the existing `NovelService`/`ChapterService` unchanged, with ownership enforced in the handler (404, not 403, for a novel/chapter that isn't yours — same non-leaking shape as the report feature's own-report-delete). Editorial flags (`is_recommended`, `is_exclusive`, the admin-typed `rating`, the manual `view_count` override) stay admin-only — the author-scoped handler zeroes them on create and preserves the existing value on every update regardless of request body. New sibling repo `novelora_author_dashboard` (React/Vite/TS/AntD, same stack as the admin dashboard) is the author-facing surface — see its own README for the frontend side. Verified end-to-end in a real browser: signed up, created a novel, published a chapter, confirmed it live in the public `GET /novels` API exactly like an admin-uploaded novel; verified a second author can't see or touch the first author's novel.
 - [ ] `RankingNotificationService`'s tracked section list only covers Trending + Comedy's Most Read — extend as more categories get their own dedicated sections
 - [ ] No admin UI to manage the ranking section list or view push delivery success/failure — both are code-only today
-- [ ] Zero automated Go test coverage anywhere in this repo — the app (`novelora_app`) has cubit-level tests; the backend has none
+- [x] First Go test coverage in this repo (2026-08-14): `internal/testsupport` is a new integration-test helper package — this codebase has no repository/service interfaces to fake behind, so tests run against the real dev Postgres pool (same `.env`/`config.Load()` the server itself uses; a small `runtime.Caller`-based lookup works around `go test` setting the working directory to the package under test, not the repo root). Covers the author-scoped novel handler's two highest-risk behaviors: ownership isolation (a second author gets 404, not 403, fetching/editing/listing another author's novel) and editorial-flag lockout (a crafted request setting `is_recommended`/`rating`/`view_count` is silently ignored) — plus `AuthService.BecomeAuthor` (profile creation, the 409-on-repeat case, empty-pen-name validation). Everything else in the repo is still untested; this is a first foothold and a reusable pattern, not full coverage.
