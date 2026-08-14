@@ -22,11 +22,18 @@ const UserRoleContextKey contextKey = "userRole"
 // separate DB lookup per action.
 const UserNameContextKey contextKey = "userName"
 
+// IsAuthorContextKey holds whether the authenticated user has an author
+// profile — an additive capability alongside role, not a role value
+// itself (a user stays "reader" or "admin" and can independently also
+// be an author; see author_profiles).
+const IsAuthorContextKey contextKey = "isAuthor"
+
 // AccessTokenClaims is what a validated access token asserts.
 type AccessTokenClaims struct {
-	UserID string
-	Role   string
-	Name   string
+	UserID   string
+	Role     string
+	Name     string
+	IsAuthor bool
 }
 
 // ValidateAccessToken verifies an HS256 access token and returns its
@@ -49,12 +56,14 @@ func ValidateAccessToken(jwtSecret []byte, tokenString string) (*AccessTokenClai
 
 	role := ""
 	name := ""
+	isAuthor := false
 	if mapClaims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
 		role, _ = mapClaims["role"].(string)
 		name, _ = mapClaims["name"].(string)
+		isAuthor, _ = mapClaims["is_author"].(bool)
 	}
 
-	return &AccessTokenClaims{UserID: subject, Role: role, Name: name}, nil
+	return &AccessTokenClaims{UserID: subject, Role: role, Name: name, IsAuthor: isAuthor}, nil
 }
 
 // Authenticate validates the Bearer access token and stores the user id
@@ -77,6 +86,7 @@ func Authenticate(jwtSecret []byte, next http.Handler) http.Handler {
 		requestContext := context.WithValue(request.Context(), UserIDContextKey, claims.UserID)
 		requestContext = context.WithValue(requestContext, UserRoleContextKey, claims.Role)
 		requestContext = context.WithValue(requestContext, UserNameContextKey, claims.Name)
+		requestContext = context.WithValue(requestContext, IsAuthorContextKey, claims.IsAuthor)
 		next.ServeHTTP(responseWriter, request.WithContext(requestContext))
 	})
 }
@@ -88,6 +98,22 @@ func RequireAdmin(next http.Handler) http.Handler {
 		role, _ := request.Context().Value(UserRoleContextKey).(string)
 		if role != "admin" {
 			writeAuthError(responseWriter, http.StatusForbidden, "admin access required")
+			return
+		}
+		next.ServeHTTP(responseWriter, request)
+	})
+}
+
+// RequireAuthor allows the request through only for users with an
+// author profile. Must be wrapped by Authenticate (it reads is_author
+// from the context) — unlike RequireAdmin, this checks a capability
+// flag, not the mutually-exclusive role value, since a user stays
+// "reader" and can independently also be an author.
+func RequireAuthor(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		isAuthor, _ := request.Context().Value(IsAuthorContextKey).(bool)
+		if !isAuthor {
+			writeAuthError(responseWriter, http.StatusForbidden, "author access required")
 			return
 		}
 		next.ServeHTTP(responseWriter, request)

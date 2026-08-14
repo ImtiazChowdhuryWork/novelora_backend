@@ -51,6 +51,12 @@ type Novel struct {
 	SortOrder int
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// OwnerUserID is nil for every admin-uploaded novel (all of them,
+	// historically) — only set for novels created through the
+	// author-scoped endpoints. AuthorName stays the reader-facing
+	// display field either way; this is purely an ACL/ownership field,
+	// see migration 0030.
+	OwnerUserID *string
 	// Genres is populated by NovelService, not this repository — see
 	// GenreRepository.ListForNovel(s). Nil until attached.
 	Genres []*Genre
@@ -71,9 +77,13 @@ type NovelListFilter struct {
 	// Sort: "" (manual order), "views" (lifetime view_count), "trending"
 	// (7-day recent-activity score, see the List switch below), "rating",
 	// "new"
-	Sort     string
-	Page     int // 1-based
-	PageSize int
+	Sort string
+	// OwnerUserID scopes to one author's own novels — nil (the default,
+	// used by every admin/public list today) means no ownership
+	// filtering at all.
+	OwnerUserID *string
+	Page        int // 1-based
+	PageSize    int
 }
 
 // NovelWrite is the mutable subset used by Create and Update.
@@ -91,6 +101,9 @@ type NovelWrite struct {
 	// RecordView makes on real reads (never made read-only for either
 	// source).
 	ViewCount int64
+	// OwnerUserID is only read by Create (Update leaves ownership
+	// immutable post-creation) — nil for admin-created novels.
+	OwnerUserID *string
 }
 
 type NovelRepository struct {
@@ -107,7 +120,7 @@ const novelColumns = `
 	n.average_rating, n.rating_count, n.support_count, n.view_count,
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id AND c.status = 'published'),
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id),
-	n.sort_order, n.created_at, n.updated_at`
+	n.sort_order, n.created_at, n.updated_at, n.owner_user_id`
 
 func scanNovel(row pgx.Row) (*Novel, error) {
 	novel := &Novel{}
@@ -116,7 +129,7 @@ func scanNovel(row pgx.Row) (*Novel, error) {
 		&novel.Status, &novel.IsShort, &novel.IsRecommended, &novel.IsExclusive, &novel.Rating,
 		&novel.AverageRating, &novel.RatingCount, &novel.SupportCount, &novel.ViewCount,
 		&novel.PublishedChapters, &novel.TotalChapters,
-		&novel.SortOrder, &novel.CreatedAt, &novel.UpdatedAt,
+		&novel.SortOrder, &novel.CreatedAt, &novel.UpdatedAt, &novel.OwnerUserID,
 	)
 	return novel, err
 }
@@ -155,6 +168,10 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 	if filter.IsExclusive != nil {
 		arguments = append(arguments, *filter.IsExclusive)
 		conditions = append(conditions, fmt.Sprintf("n.is_exclusive = $%d", len(arguments)))
+	}
+	if filter.OwnerUserID != nil {
+		arguments = append(arguments, *filter.OwnerUserID)
+		conditions = append(conditions, fmt.Sprintf("n.owner_user_id = $%d", len(arguments)))
 	}
 	if len(filter.GenreIDs) > 0 {
 		arguments = append(arguments, filter.GenreIDs)
@@ -287,13 +304,13 @@ func (repository *NovelRepository) GetByID(ctx context.Context, novelID string) 
 func (repository *NovelRepository) Create(ctx context.Context, write NovelWrite) (*Novel, error) {
 	novel, err := scanNovel(repository.pool.QueryRow(ctx, `
 		WITH inserted AS (
-			INSERT INTO novels (title, author_name, synopsis, status, is_short, is_recommended, is_exclusive, rating, view_count, sort_order)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT coalesce(max(sort_order), 0) + 1 FROM novels))
+			INSERT INTO novels (title, author_name, synopsis, status, is_short, is_recommended, is_exclusive, rating, view_count, owner_user_id, sort_order)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT coalesce(max(sort_order), 0) + 1 FROM novels))
 			RETURNING *
 		)
 		SELECT `+novelColumns+` FROM inserted n`,
 		write.Title, write.AuthorName, write.Synopsis, write.Status,
-		write.IsShort, write.IsRecommended, write.IsExclusive, write.Rating, write.ViewCount))
+		write.IsShort, write.IsRecommended, write.IsExclusive, write.Rating, write.ViewCount, write.OwnerUserID))
 	if err != nil {
 		return nil, fmt.Errorf("insert novel: %w", err)
 	}
