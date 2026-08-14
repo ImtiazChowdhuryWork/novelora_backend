@@ -39,6 +39,7 @@ type reportResponse struct {
 	NovelID        string     `json:"novel_id"`
 	NovelTitle     string     `json:"novel_title"`
 	AuthorName     string     `json:"author_name"`
+	OwnerUserID    *string    `json:"owner_user_id"`
 	UserID         string     `json:"user_id"`
 	Username       string     `json:"username"`
 	Reason         string     `json:"reason"`
@@ -49,9 +50,12 @@ type reportResponse struct {
 	Images         []string   `json:"images"`
 	Status         string     `json:"status"`
 	ResolutionNote string     `json:"resolution_note"`
+	AuthorResponse string     `json:"author_response"`
 	ReviewedByName string     `json:"reviewed_by_name"`
 	ReviewedAt     *time.Time `json:"reviewed_at"`
 	CreatedAt      time.Time  `json:"created_at"`
+	ChapterStatus  *string    `json:"chapter_status"`
+	NovelHidden    bool       `json:"novel_hidden"`
 }
 
 func newReportResponse(report *repository.NovelReport) reportResponse {
@@ -64,6 +68,7 @@ func newReportResponse(report *repository.NovelReport) reportResponse {
 		NovelID:        report.NovelID,
 		NovelTitle:     report.NovelTitle,
 		AuthorName:     report.AuthorName,
+		OwnerUserID:    report.OwnerUserID,
 		UserID:         report.UserID,
 		Username:       report.Username,
 		Reason:         report.Reason,
@@ -74,9 +79,12 @@ func newReportResponse(report *repository.NovelReport) reportResponse {
 		Images:         imageURLs,
 		Status:         report.Status,
 		ResolutionNote: report.ResolutionNote,
+		AuthorResponse: report.AuthorResponse,
 		ReviewedByName: report.ReviewedByName,
 		ReviewedAt:     report.ReviewedAt,
 		CreatedAt:      report.CreatedAt,
+		ChapterStatus:  report.ChapterStatus,
+		NovelHidden:    report.NovelHidden,
 	}
 }
 
@@ -197,4 +205,48 @@ func (handler *NovelReportHandler) Mine(responseWriter http.ResponseWriter, requ
 		items = append(items, newReportResponse(report))
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items, "total": total})
+}
+
+// ListForOwner: GET /author/reports?status=&page=&page_size= — the
+// author dashboard's "Notices" page. Requires the RequireAuthor
+// middleware.
+func (handler *NovelReportHandler) ListForOwner(responseWriter http.ResponseWriter, request *http.Request) {
+	ownerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+
+	query := request.URL.Query()
+	page, _ := strconv.Atoi(query.Get("page"))
+	pageSize, _ := strconv.Atoi(query.Get("page_size"))
+
+	reports, total, err := handler.reports.ListForOwner(request.Context(), ownerUserID, query.Get("status"), page, pageSize)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	items := make([]reportResponse, 0, len(reports))
+	for _, report := range reports {
+		items = append(items, newReportResponse(report))
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items, "total": total})
+}
+
+type resubmitReportRequest struct {
+	Message string `json:"message"`
+}
+
+// Resubmit: POST /author/reports/{id}/resubmit — {message}. The author
+// telling the admin they've fixed what resolution_note asked for.
+// Requires the RequireAuthor middleware.
+func (handler *NovelReportHandler) Resubmit(responseWriter http.ResponseWriter, request *http.Request) {
+	callerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+
+	var body resubmitReportRequest
+	if !decodeJSON(responseWriter, request, &body) {
+		return
+	}
+	report, err := handler.reports.Resubmit(request.Context(), request.PathValue("id"), callerUserID, body.Message)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	writeJSON(responseWriter, http.StatusOK, newReportResponse(report))
 }

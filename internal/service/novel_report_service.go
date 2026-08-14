@@ -171,6 +171,21 @@ func (service *NovelReportService) CountPending(ctx context.Context) (int, error
 	return service.reports.CountPending(ctx)
 }
 
+// ListForOwner is the author dashboard's "Notices" page — every report
+// against a novel the caller owns, same pagination/clamp rules as List.
+func (service *NovelReportService) ListForOwner(ctx context.Context, ownerUserID, status string, page, pageSize int) ([]*repository.NovelReport, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	switch {
+	case pageSize < 1:
+		pageSize = 20
+	case pageSize > 100:
+		pageSize = 100
+	}
+	return service.reports.ListForOwner(ctx, ownerUserID, status, page, pageSize)
+}
+
 // Delete withdraws the caller's own report — ownership is enforced by
 // the repository query itself (scoped to userID), so a report id that
 // exists but belongs to someone else reads identically to one that
@@ -189,19 +204,34 @@ func (service *NovelReportService) Delete(ctx context.Context, reportID, userID 
 	return nil
 }
 
-var allowedReportStatuses = map[string]bool{"pending": true, "reviewed": true, "dismissed": true}
+// allowedReportStatuses are admin-settable via UpdateStatus.
+// "resubmitted" is deliberately excluded — a report can only reach
+// that state through the author's own Resubmit call, never directly
+// set by an admin, so the author's step in the loop can't be skipped.
+var allowedReportStatuses = map[string]bool{
+	"pending":         true,
+	"action_required": true,
+	"reviewed":        true,
+	"dismissed":       true,
+}
 
 // UpdateStatus actions a report — the dashboard's moderation button.
 // Moving a report off "pending" notifies the reporting reader (inbox
 // row + best-effort push, deep-linking to the novel) with the admin's
-// note if one was given, or a generic acknowledgement otherwise. There
-// is no author-account system yet, so this is deliberately just "we
-// reviewed it" — never implies an author was contacted.
+// note if one was given, or a generic acknowledgement otherwise.
+// "action_required" additionally requires a non-empty note (it's the
+// "what to fix" instruction) and, when the reported novel has a real
+// author account (see migration 0030), notifies that author too —
+// legacy/admin-uploaded novels with no linked account skip that half
+// gracefully, same fallback shape the moderation-panel rework used.
 func (service *NovelReportService) UpdateStatus(ctx context.Context, reportID, status, note, reviewerID string) (*repository.NovelReport, error) {
 	if !allowedReportStatuses[status] {
 		return nil, &ValidationError{Message: "invalid report status"}
 	}
 	note = strings.TrimSpace(note)
+	if status == "action_required" && note == "" {
+		return nil, &ValidationError{Message: "a note describing what to fix is required"}
+	}
 	report, err := service.reports.UpdateStatus(ctx, reportID, status, note, reviewerID)
 	if err != nil {
 		return nil, err
@@ -211,6 +241,34 @@ func (service *NovelReportService) UpdateStatus(ctx context.Context, reportID, s
 	if status != "pending" {
 		service.notifyReporter(ctx, report, note)
 	}
+	if status == "action_required" && report.OwnerUserID != nil {
+		service.notifyAuthor(ctx, report, note)
+	}
+	return report, nil
+}
+
+// Resubmit is the author's side of the loop — they've addressed the
+// admin's resolution_note and want it looked at again. Ownership is
+// enforced here (not the repository), same non-leaking 404 shape as
+// loadOwnedNovel: a report that exists but belongs to a novel the
+// caller doesn't own reads identically to one that doesn't exist.
+func (service *NovelReportService) Resubmit(ctx context.Context, reportID, callerUserID, message string) (*repository.NovelReport, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.OwnerUserID == nil || *report.OwnerUserID != callerUserID {
+		return nil, repository.ErrReportNotFound
+	}
+	if report.Status != "action_required" {
+		return nil, &ValidationError{Message: "this report isn't awaiting a fix"}
+	}
+
+	report, err = service.reports.Resubmit(ctx, reportID, strings.TrimSpace(message))
+	if err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: report.ID})
 	return report, nil
 }
 
@@ -231,4 +289,23 @@ func (service *NovelReportService) notifyReporter(ctx context.Context, report *r
 		return
 	}
 	service.pushNotifier.NotifyNovelHighlight(ctx, tokens, report.NovelID, report.NovelTitle, body)
+}
+
+// notifyAuthor tells the novel's real author account that a report
+// against their novel needs action — only called when one exists (see
+// UpdateStatus). Same dual-path (inbox + best-effort push) shape as
+// notifyReporter.
+func (service *NovelReportService) notifyAuthor(ctx context.Context, report *repository.NovelReport, note string) {
+	title := fmt.Sprintf("Action needed on \"%s\"", report.NovelTitle)
+
+	if err := service.notifications.CreateForUser(ctx, *report.OwnerUserID, report.NovelID, title, note); err != nil {
+		return
+	}
+	service.events.Publish(realtime.Event{Topic: "notification.new"})
+
+	tokens, err := service.deviceTokens.ListTokensForUser(ctx, *report.OwnerUserID)
+	if err != nil || len(tokens) == 0 {
+		return
+	}
+	service.pushNotifier.NotifyNovelHighlight(ctx, tokens, report.NovelID, report.NovelTitle, note)
 }

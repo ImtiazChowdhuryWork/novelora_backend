@@ -174,6 +174,41 @@ func (authorChapterHandler *AuthorChapterHandler) Schedule(responseWriter http.R
 	writeJSON(responseWriter, http.StatusOK, newChapterResponse(chapter))
 }
 
+// Import: POST /author/novels/{id}/chapters/import — bulk-add chapters
+// extracted client-side from a PDF/text manuscript. Reuses
+// importChaptersRequest/chapterWriteRequest from admin_chapter_handler.go
+// (same package) and decodeLargeJSON since extracted text can be large.
+// A chapter whose title matches one this novel already has replaces
+// that chapter's content in place; everything else is appended as a
+// new draft — see ChapterService.Import.
+func (authorChapterHandler *AuthorChapterHandler) Import(responseWriter http.ResponseWriter, request *http.Request) {
+	callerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novel, err := loadOwnedNovel(request, authorChapterHandler.novelService, request.PathValue("id"), callerUserID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+
+	var importRequest importChaptersRequest
+	if !decodeLargeJSON(responseWriter, request, &importRequest) {
+		return
+	}
+	writes := make([]repository.ChapterWrite, 0, len(importRequest.Chapters))
+	for _, chapterRequest := range importRequest.Chapters {
+		writes = append(writes, chapterRequest.toWrite())
+	}
+
+	created, updated, err := authorChapterHandler.chapterService.Import(request.Context(), novel.ID, writes)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	authorChapterHandler.auditLogger.Log(actorID, actorName, "chapter.imported", "novel", novel.ID,
+		map[string]any{"created": created, "updated": updated})
+	writeJSON(responseWriter, http.StatusCreated, map[string]any{"created": created, "updated": updated})
+}
+
 // Delete: DELETE /author/chapters/{id}
 func (authorChapterHandler *AuthorChapterHandler) Delete(responseWriter http.ResponseWriter, request *http.Request) {
 	callerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)

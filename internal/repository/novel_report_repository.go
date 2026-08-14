@@ -24,6 +24,11 @@ type NovelReport struct {
 	NovelID        string
 	NovelTitle     string
 	AuthorName     string
+	// OwnerUserID is the novel's real author account, if it has one
+	// (nil for admin-uploaded/unclaimed novels) — see migration 0030.
+	// Lets the moderation panel key off the real account when possible
+	// instead of always falling back to the free-text AuthorName.
+	OwnerUserID    *string
 	UserID         string
 	Username       string
 	Reason         string
@@ -32,6 +37,11 @@ type NovelReport struct {
 	ChapterTitle   *string
 	Status         string
 	ResolutionNote string
+	// AuthorResponse is the author's own message when they resubmit a
+	// report for re-review after fixing what the admin's
+	// ResolutionNote asked for — see Resubmit. Reset to '' whenever an
+	// admin issues a fresh note via UpdateStatus.
+	AuthorResponse string
 	ReviewedBy     *string
 	ReviewedByName string
 	ReviewedAt     *time.Time
@@ -42,6 +52,13 @@ type NovelReport struct {
 	// evidence indicator without fetching every image's URL.
 	ImageCount int
 	Images     []NovelReportImage
+	// ChapterStatus is the chapter's *live* status (nil when the report
+	// isn't about a specific chapter), and NovelHidden is the novel's
+	// live soft-delete state — both let the report detail drawer show
+	// "Unpublish"/"Republish" and "Hide"/"Restore" correctly instead of
+	// only ever offering the one-way action.
+	ChapterStatus *string
+	NovelHidden   bool
 }
 
 // NovelReportImage is one screenshot attached as evidence — up to
@@ -62,19 +79,21 @@ func NewNovelReportRepository(pool *pgxpool.Pool) *NovelReportRepository {
 }
 
 const reportColumns = `
-	r.id, r.novel_id, n.title, n.author_name, r.user_id, u.username,
+	r.id, r.novel_id, n.title, n.author_name, n.owner_user_id, r.user_id, u.username,
 	r.reason, r.details, r.chapter_id, c.title,
-	r.status, r.resolution_note, r.reviewed_by, coalesce(reviewer.username, ''),
+	r.status, r.resolution_note, r.author_response, r.reviewed_by, coalesce(reviewer.username, ''),
 	r.reviewed_at, r.created_at,
-	(SELECT count(*) FROM novel_report_images ri WHERE ri.report_id = r.id)`
+	(SELECT count(*) FROM novel_report_images ri WHERE ri.report_id = r.id),
+	c.status, (n.deleted_at IS NOT NULL)`
 
 func scanReport(row pgx.Row) (*NovelReport, error) {
 	report := &NovelReport{}
 	err := row.Scan(
-		&report.ID, &report.NovelID, &report.NovelTitle, &report.AuthorName, &report.UserID, &report.Username,
+		&report.ID, &report.NovelID, &report.NovelTitle, &report.AuthorName, &report.OwnerUserID, &report.UserID, &report.Username,
 		&report.Reason, &report.Details, &report.ChapterID, &report.ChapterTitle,
-		&report.Status, &report.ResolutionNote, &report.ReviewedBy, &report.ReviewedByName,
+		&report.Status, &report.ResolutionNote, &report.AuthorResponse, &report.ReviewedBy, &report.ReviewedByName,
 		&report.ReviewedAt, &report.CreatedAt, &report.ImageCount,
+		&report.ChapterStatus, &report.NovelHidden,
 	)
 	return report, err
 }
@@ -181,31 +200,37 @@ func (repository *NovelReportRepository) List(ctx context.Context, status string
 	return reports, total, rows.Err()
 }
 
-// CountPending backs the Overview page's pending-reports tile.
+// CountPending backs the Overview page's pending-reports tile — counts
+// every status that still needs an admin to look at it, not just the
+// initial "pending" (a resubmitted report needs attention just as much).
 func (repository *NovelReportRepository) CountPending(ctx context.Context) (int, error) {
 	var count int
 	err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports WHERE status = 'pending'").Scan(&count)
+		"SELECT count(*) FROM novel_reports WHERE status IN ('pending', 'action_required', 'resubmitted')").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count pending reports: %w", err)
 	}
 	return count, nil
 }
 
-// UpdateStatus actions a report (reviewed/dismissed) — any status
-// value other than "pending" stamps reviewedBy/reviewed_at and stores
-// the admin's note (may be empty); setting it back to "pending" (rare,
-// but not disallowed) clears reviewedBy/reviewed_at and the note.
+// UpdateStatus actions a report (action_required/reviewed/dismissed) —
+// any status value other than "pending" stamps reviewedBy/reviewed_at,
+// stores the admin's note (may be empty unless status is
+// "action_required" — see NovelReportService), and clears
+// author_response, since a fresh admin note starts a new cycle and a
+// reply from a previous round-trip shouldn't linger next to it.
+// Setting it back to "pending" (rare, but not disallowed) clears
+// reviewedBy/reviewed_at and both note fields.
 func (repository *NovelReportRepository) UpdateStatus(ctx context.Context, reportID, status, note, reviewerID string) (*NovelReport, error) {
 	var commandTag pgconn.CommandTag
 	var err error
 	if status == "pending" {
 		commandTag, err = repository.pool.Exec(ctx, `
-			UPDATE novel_reports SET status = $2, resolution_note = '', reviewed_by = NULL, reviewed_at = NULL
+			UPDATE novel_reports SET status = $2, resolution_note = '', author_response = '', reviewed_by = NULL, reviewed_at = NULL
 			WHERE id = $1`, reportID, status)
 	} else {
 		commandTag, err = repository.pool.Exec(ctx, `
-			UPDATE novel_reports SET status = $2, resolution_note = $3, reviewed_by = $4, reviewed_at = now()
+			UPDATE novel_reports SET status = $2, resolution_note = $3, author_response = '', reviewed_by = $4, reviewed_at = now()
 			WHERE id = $1`, reportID, status, note, reviewerID)
 	}
 	if err != nil {
@@ -215,6 +240,106 @@ func (repository *NovelReportRepository) UpdateStatus(ctx context.Context, repor
 		return nil, ErrReportNotFound
 	}
 	return repository.GetByID(ctx, reportID)
+}
+
+// Resubmit is the author's side of the loop: they've fixed whatever
+// the admin's resolution_note asked for and want it re-reviewed.
+// Deliberately leaves resolution_note/reviewed_by/reviewed_at
+// untouched, so the admin's original instruction stays visible right
+// alongside the author's response.
+func (repository *NovelReportRepository) Resubmit(ctx context.Context, reportID, authorResponse string) (*NovelReport, error) {
+	commandTag, err := repository.pool.Exec(ctx, `
+		UPDATE novel_reports SET status = 'resubmitted', author_response = $2
+		WHERE id = $1`, reportID, authorResponse)
+	if err != nil {
+		return nil, fmt.Errorf("resubmit report: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return nil, ErrReportNotFound
+	}
+	return repository.GetByID(ctx, reportID)
+}
+
+// ListForOwner is the author-facing "Notices" list — every report
+// against a novel owned by ownerUserID, optionally filtered to one
+// status ("" = all).
+func (repository *NovelReportRepository) ListForOwner(ctx context.Context, ownerUserID, status string, page, pageSize int) ([]*NovelReport, int, error) {
+	var total int
+	if err := repository.pool.QueryRow(ctx, `
+		SELECT count(*) FROM novel_reports r JOIN novels n ON n.id = r.novel_id
+		WHERE n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)`,
+		ownerUserID, status).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count owner reports: %w", err)
+	}
+
+	rows, err := repository.pool.Query(ctx, `
+		SELECT `+reportColumns+`
+		FROM `+reportFromClause+`
+		WHERE n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)
+		ORDER BY r.created_at DESC
+		LIMIT $3 OFFSET $4`, ownerUserID, status, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list owner reports: %w", err)
+	}
+	defer rows.Close()
+
+	reports := []*NovelReport{}
+	for rows.Next() {
+		report, err := scanReport(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("scan report: %w", err)
+		}
+		reports = append(reports, report)
+	}
+	return reports, total, rows.Err()
+}
+
+// ListForAuthorName returns every report against novels by this author
+// name, newest first — the admin report detail drawer's report-history
+// section, for authors with no real account (mirrors
+// AuthorStrikeRepository.ListForAuthor). Unpaginated: same reasoning
+// as strikes/other-novels — small per-author datasets.
+func (repository *NovelReportRepository) ListForAuthorName(ctx context.Context, authorName string) ([]*NovelReport, error) {
+	rows, err := repository.pool.Query(ctx,
+		"SELECT "+reportColumns+" FROM "+reportFromClause+" WHERE n.author_name = $1 ORDER BY r.created_at DESC",
+		authorName)
+	if err != nil {
+		return nil, fmt.Errorf("list reports for author name: %w", err)
+	}
+	defer rows.Close()
+
+	reports := []*NovelReport{}
+	for rows.Next() {
+		report, err := scanReport(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan report: %w", err)
+		}
+		reports = append(reports, report)
+	}
+	return reports, rows.Err()
+}
+
+// ListForOwnerAll is ListForAuthorName's real-account counterpart —
+// distinct from ListForOwner, which is the paginated author-dashboard
+// "Notices" list.
+func (repository *NovelReportRepository) ListForOwnerAll(ctx context.Context, ownerUserID string) ([]*NovelReport, error) {
+	rows, err := repository.pool.Query(ctx,
+		"SELECT "+reportColumns+" FROM "+reportFromClause+" WHERE n.owner_user_id = $1 ORDER BY r.created_at DESC",
+		ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list reports for owner: %w", err)
+	}
+	defer rows.Close()
+
+	reports := []*NovelReport{}
+	for rows.Next() {
+		report, err := scanReport(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan report: %w", err)
+		}
+		reports = append(reports, report)
+	}
+	return reports, rows.Err()
 }
 
 // HasReported is the reader-facing "did I already report this novel"

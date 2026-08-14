@@ -4,10 +4,17 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/middleware"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/repository"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/service"
+)
+
+// Mirrors AuthService's own become-author limits (internal/service/auth_service.go)
+const (
+	maxAuthorPenNameLength = 100
+	maxAuthorBioLength     = 2000
 )
 
 type UserHandler struct {
@@ -97,6 +104,49 @@ func (userHandler *UserHandler) CurrentUser(responseWriter http.ResponseWriter, 
 	userHandler.respondWithUser(responseWriter, request, userID)
 }
 
+type authorProfileUpdateRequest struct {
+	PenName string `json:"pen_name"`
+	Bio     string `json:"bio"`
+}
+
+// UpdateAuthorProfile: PUT /users/me/author-profile — the ongoing edit
+// path (POST at the same path is the one-time become-author create,
+// see AuthHandler.BecomeAuthor). Requires the Authenticate middleware;
+// deliberately not RequireAuthor-gated the same way create isn't —
+// Update itself 404s via ErrAuthorProfileNotFound for a caller with no
+// profile, which is a clearer signal than a blanket 403.
+func (userHandler *UserHandler) UpdateAuthorProfile(responseWriter http.ResponseWriter, request *http.Request) {
+	var requestBody authorProfileUpdateRequest
+	if !decodeJSON(responseWriter, request, &requestBody) {
+		return
+	}
+	penName := strings.TrimSpace(requestBody.PenName)
+	bio := strings.TrimSpace(requestBody.Bio)
+	if penName == "" {
+		writeError(responseWriter, http.StatusBadRequest, "pen name is required")
+		return
+	}
+	if len(penName) > maxAuthorPenNameLength {
+		writeError(responseWriter, http.StatusBadRequest, "pen name is too long")
+		return
+	}
+	if len(bio) > maxAuthorBioLength {
+		writeError(responseWriter, http.StatusBadRequest, "bio is too long")
+		return
+	}
+
+	userID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	if _, err := userHandler.authorProfiles.Update(request.Context(), userID, penName, bio); err != nil {
+		if errors.Is(err, repository.ErrAuthorProfileNotFound) {
+			writeError(responseWriter, http.StatusNotFound, "author profile not found")
+			return
+		}
+		userHandler.internalError(responseWriter, err)
+		return
+	}
+	userHandler.respondWithUser(responseWriter, request, userID)
+}
+
 // UpdateAvatar stores an uploaded image (multipart field "avatar") and
 // points the user's avatar_url at it. Requires the Authenticate middleware.
 func (userHandler *UserHandler) UpdateAvatar(responseWriter http.ResponseWriter, request *http.Request) {
@@ -145,9 +195,11 @@ func (userHandler *UserHandler) respondWithUser(responseWriter http.ResponseWrit
 	}
 
 	penName := ""
+	bio := ""
 	authorProfile, err := userHandler.authorProfiles.GetByUserID(request.Context(), userID)
 	if err == nil {
 		penName = authorProfile.PenName
+		bio = authorProfile.Bio
 	} else if !errors.Is(err, repository.ErrAuthorProfileNotFound) {
 		userHandler.internalError(responseWriter, err)
 		return
@@ -161,6 +213,7 @@ func (userHandler *UserHandler) respondWithUser(responseWriter http.ResponseWrit
 		"role":       user.Role,
 		"is_author":  penName != "",
 		"pen_name":   penName,
+		"bio":        bio,
 		"created_at": user.CreatedAt,
 	})
 }

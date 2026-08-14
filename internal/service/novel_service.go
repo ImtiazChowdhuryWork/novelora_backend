@@ -349,6 +349,17 @@ func (novelService *NovelService) Delete(ctx context.Context, novelID string) er
 	return nil
 }
 
+// Restore reverses Delete — publishes "novel.updated" (not
+// "novel.deleted") since nothing needs to disappear, everything
+// needs to refetch and find the novel visible again.
+func (novelService *NovelService) Restore(ctx context.Context, novelID string) error {
+	if err := novelService.novels.Restore(ctx, novelID); err != nil {
+		return err
+	}
+	novelService.events.Publish(realtime.Event{Topic: "novel.updated", ID: novelID})
+	return nil
+}
+
 func validateNovelWrite(write *repository.NovelWrite) error {
 	write.Title = strings.TrimSpace(write.Title)
 	write.AuthorName = strings.TrimSpace(write.AuthorName)

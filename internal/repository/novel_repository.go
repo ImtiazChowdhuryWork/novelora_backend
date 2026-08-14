@@ -441,6 +441,22 @@ func (repository *NovelRepository) SoftDelete(ctx context.Context, novelID strin
 	return nil
 }
 
+// Restore reverses SoftDelete — the report detail drawer's "Restore
+// this novel" action, once an admin decides a hide was premature or
+// the author has fixed what was reported.
+func (repository *NovelRepository) Restore(ctx context.Context, novelID string) error {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novels SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL",
+		novelID)
+	if err != nil {
+		return fmt.Errorf("restore novel: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNovelNotFound
+	}
+	return nil
+}
+
 // ListByAuthorName is the admin report detail view's "other novels by
 // this author" panel — an exact, case-sensitive match against the same
 // free-text author_name every novel already carries (there's no
@@ -478,6 +494,55 @@ func (repository *NovelRepository) BulkHideByAuthorName(ctx context.Context, aut
 		authorName)
 	if err != nil {
 		return nil, fmt.Errorf("bulk hide novels by author: %w", err)
+	}
+	defer rows.Close()
+
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan bulk-hidden novel id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListByOwnerUserID is ListByAuthorName's real-account counterpart —
+// used instead of it when the report being reviewed points at a novel
+// with a real owner_user_id (see migration 0030), rather than an
+// exact author_name string match. Same shape, same caller (the
+// moderation panel's "other novels" list).
+func (repository *NovelRepository) ListByOwnerUserID(ctx context.Context, ownerUserID string) ([]*Novel, error) {
+	rows, err := repository.pool.Query(ctx, `
+		SELECT `+novelColumns+`
+		FROM novels n
+		WHERE n.owner_user_id = $1 AND n.deleted_at IS NULL
+		ORDER BY n.created_at DESC`, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list novels by owner: %w", err)
+	}
+	defer rows.Close()
+
+	novels := []*Novel{}
+	for rows.Next() {
+		novel, err := scanNovel(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan novel: %w", err)
+		}
+		novels = append(novels, novel)
+	}
+	return novels, rows.Err()
+}
+
+// BulkHideByOwnerUserID is BulkHideByAuthorName's real-account
+// counterpart — same shape, same caller.
+func (repository *NovelRepository) BulkHideByOwnerUserID(ctx context.Context, ownerUserID string) ([]string, error) {
+	rows, err := repository.pool.Query(ctx,
+		"UPDATE novels SET deleted_at = now() WHERE owner_user_id = $1 AND deleted_at IS NULL RETURNING id",
+		ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("bulk hide novels by owner: %w", err)
 	}
 	defer rows.Close()
 

@@ -149,6 +149,25 @@ func (authorNovelHandler *AuthorNovelHandler) Update(responseWriter http.Respons
 	writeJSON(responseWriter, http.StatusOK, newNovelResponse(novel))
 }
 
+// Delete: DELETE /author/novels/{id} — an author withdrawing their own
+// novel. Soft-delete, same as admin's, so recovery stays possible.
+func (authorNovelHandler *AuthorNovelHandler) Delete(responseWriter http.ResponseWriter, request *http.Request) {
+	callerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	novel, err := loadOwnedNovel(request, authorNovelHandler.novelService, request.PathValue("id"), callerUserID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	if err := authorNovelHandler.novelService.Delete(request.Context(), novel.ID); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	authorNovelHandler.auditLogger.Log(actorID, actorName, "novel.deleted", "novel", novel.ID,
+		map[string]any{"title": novel.Title})
+	responseWriter.WriteHeader(http.StatusNoContent)
+}
+
 // UpdateCover: PUT /author/novels/{id}/cover — multipart field "cover".
 func (authorNovelHandler *AuthorNovelHandler) UpdateCover(responseWriter http.ResponseWriter, request *http.Request) {
 	callerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)

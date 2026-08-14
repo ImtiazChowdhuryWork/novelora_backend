@@ -78,3 +78,22 @@ func (repository *AuthorProfileRepository) Create(ctx context.Context, userID, p
 	}
 	return profile, nil
 }
+
+// Update changes an existing author's pen name/bio — Create is
+// one-time-only (see its doc comment), this is the ongoing edit path.
+func (repository *AuthorProfileRepository) Update(ctx context.Context, userID, penName, bio string) (*AuthorProfile, error) {
+	profile := &AuthorProfile{}
+	err := repository.pool.QueryRow(ctx, `
+		UPDATE author_profiles SET pen_name = $2, bio = $3
+		WHERE user_id = $1
+		RETURNING user_id, pen_name, bio, created_at`,
+		userID, penName, bio,
+	).Scan(&profile.UserID, &profile.PenName, &profile.Bio, &profile.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAuthorProfileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update author profile: %w", err)
+	}
+	return profile, nil
+}
