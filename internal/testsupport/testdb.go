@@ -122,6 +122,7 @@ func NewServices(t *testing.T, pool *pgxpool.Pool) *Services {
 	notificationRepository := repository.NewNotificationRepository(pool)
 	chapterRepository := repository.NewChapterRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
+	outboxRepository := repository.NewOutboxRepository(pool)
 
 	// Publish() is a non-blocking channel send even without Run() ever
 	// started — safe to leave un-started in tests, no goroutine needed.
@@ -133,9 +134,11 @@ func NewServices(t *testing.T, pool *pgxpool.Pool) *Services {
 		configuration.JWTSecret, configuration.AccessTokenTTL, configuration.RefreshTokenTTL, configuration.GoogleClientID)
 	novelService := service.NewNovelService(
 		novelRepository, genreRepository, novelRatingRepository, novelSupportRepository,
-		readingHistoryRepository, deviceTokenRepository, notificationRepository, notifier, eventHub)
+		readingHistoryRepository, deviceTokenRepository, notificationRepository, notifier, eventHub,
+		outboxRepository)
 	chapterService := service.NewChapterService(
-		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, notifier, eventHub)
+		chapterRepository, novelRepository, deviceTokenRepository, notificationRepository, notifier, eventHub,
+		outboxRepository)
 
 	return &Services{
 		Pool:           pool,

@@ -2,10 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/push"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
@@ -27,6 +27,7 @@ type NovelService struct {
 	notifications  *repository.NotificationRepository
 	notifier       push.Notifier
 	events         realtime.Publisher
+	outbox         *repository.OutboxRepository
 }
 
 func NewNovelService(
@@ -39,6 +40,7 @@ func NewNovelService(
 	notifications *repository.NotificationRepository,
 	notifier push.Notifier,
 	events realtime.Publisher,
+	outbox *repository.OutboxRepository,
 ) *NovelService {
 	return &NovelService{
 		novels:         novels,
@@ -50,6 +52,7 @@ func NewNovelService(
 		notifications:  notifications,
 		notifier:       notifier,
 		events:         events,
+		outbox:         outbox,
 	}
 }
 
@@ -137,18 +140,39 @@ func (novelService *NovelService) Create(ctx context.Context, write repository.N
 		return nil, err
 	}
 	novelService.events.Publish(realtime.Event{Topic: "novel.created", ID: novel.ID})
-	go novelService.notifyNewNovelCreated(novel)
+	if err := novelService.outbox.Enqueue(ctx, "novel.created", novelCreatedPayload{NovelID: novel.ID}); err != nil {
+		log.Printf("outbox: could not enqueue novel.created for %s: %v", novel.ID, err)
+	}
 	return novel, nil
 }
 
-// notifyNewNovelCreated runs on its own timeout-bounded context — never
-// the request's — so a slow or failing push provider can't delay or
-// fail the create response. Same dual-path shape as
-// ChapterService.notifyNewChapterPublished: FCM push and in-app inbox
-// populated independently, so a failure in one doesn't skip the other.
-func (novelService *NovelService) notifyNewNovelCreated(novel *repository.Novel) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+// novelCreatedPayload is the outbox payload for a "novel.created"
+// event — just enough to re-fetch fresh state at delivery time.
+type novelCreatedPayload struct {
+	NovelID string `json:"novel_id"`
+}
+
+// DeliverNovelCreatedNotification is called by the outbox processor
+// (see OutboxProcessor), never directly from the request path — that's
+// what makes it durable, unlike the fire-and-forget goroutine this
+// replaced. Same dual-path shape as
+// ChapterService.DeliverChapterPublishedNotification: FCM push and
+// in-app inbox populated independently, so a failure in one doesn't
+// skip the other.
+func (novelService *NovelService) DeliverNovelCreatedNotification(ctx context.Context, payload []byte) error {
+	var decoded novelCreatedPayload
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return fmt.Errorf("unmarshal novel.created payload: %w", err)
+	}
+
+	novel, err := novelService.novels.GetByID(ctx, decoded.NovelID)
+	if err != nil {
+		if err == repository.ErrNovelNotFound {
+			log.Printf("outbox: novel %s no longer exists, skipping notification", decoded.NovelID)
+			return nil
+		}
+		return fmt.Errorf("load novel %s: %w", decoded.NovelID, err)
+	}
 
 	body := fmt.Sprintf("%q was just added", novel.Title)
 
@@ -160,10 +184,10 @@ func (novelService *NovelService) notifyNewNovelCreated(novel *repository.Novel)
 	}
 
 	if err := novelService.notifications.CreateNovelNotificationForAllUsers(ctx, novel.ID, novel.Title, body); err != nil {
-		log.Printf("inbox: could not create notification for novel %s: %v", novel.ID, err)
-		return
+		return fmt.Errorf("create inbox notification for novel %s: %w", novel.ID, err)
 	}
 	novelService.events.Publish(realtime.Event{Topic: "notification.new"})
+	return nil
 }
 
 func (novelService *NovelService) Update(ctx context.Context, novelID string, write repository.NovelWrite, genreIDs []string) (*repository.Novel, error) {
