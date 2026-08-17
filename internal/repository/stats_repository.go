@@ -36,7 +36,7 @@ func (repository *StatsRepository) Get(ctx context.Context) (*Stats, error) {
 			(SELECT count(*) FROM chapters),
 			(SELECT count(*) FROM chapters WHERE status = 'published'),
 			(SELECT count(*) FROM genres),
-			(SELECT count(*) FROM novel_reports WHERE status IN ('pending', 'action_required', 'resubmitted'))`,
+			(SELECT count(*) FROM novel_reports WHERE status NOT IN ('resolved', 'rejected'))`,
 	).Scan(&stats.TotalNovels, &stats.TotalUsers, &stats.TotalChapters,
 		&stats.PublishedChapters, &stats.TotalGenres, &stats.PendingReports)
 	if err != nil {

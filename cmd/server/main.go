@@ -67,6 +67,8 @@ func main() {
 	novelCommentRepository := repository.NewNovelCommentRepository(pool)
 	novelSupportRepository := repository.NewNovelSupportRepository(pool)
 	novelReportRepository := repository.NewNovelReportRepository(pool)
+	moderationActionRepository := repository.NewModerationActionRepository(pool)
+	releaseRequestRepository := repository.NewReleaseRequestRepository(pool)
 	authorStrikeRepository := repository.NewAuthorStrikeRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
 	auditLogger := audit.NewLogger(auditLogRepository)
@@ -104,6 +106,7 @@ func main() {
 	novelCommentService := service.NewNovelCommentService(novelCommentRepository, novelRepository, eventHub)
 	novelReportService := service.NewNovelReportService(
 		novelReportRepository, novelRepository, chapterRepository,
+		moderationActionRepository, releaseRequestRepository, novelService, chapterService,
 		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
 	authorModerationService := service.NewAuthorModerationService(novelRepository, authorStrikeRepository, novelReportRepository, eventHub)
 
@@ -258,16 +261,27 @@ func main() {
 	mux.Handle("PUT /api/v1/author/chapters/{id}/schedule", requireAuthor(authorChapterHandler.Schedule))
 	mux.Handle("DELETE /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Delete))
 	mux.Handle("GET /api/v1/author/reports", requireAuthor(novelReportHandler.ListForOwner))
-	mux.Handle("POST /api/v1/author/reports/{id}/resubmit", requireAuthor(novelReportHandler.Resubmit))
+	mux.Handle("GET /api/v1/author/reports/{id}/release-requests", requireAuthor(novelReportHandler.ReleaseRequestsForOwner))
+	mux.Handle("POST /api/v1/author/reports/{id}/release-requests", requireAuthor(novelReportHandler.SubmitReleaseRequest))
 
 	// Admin: comment moderation
 	mux.Handle("GET /api/v1/admin/novels/{id}/comments", requireAdmin(novelCommentHandler.List))
 	mux.Handle("DELETE /api/v1/admin/comments/{id}", requireAdmin(novelCommentHandler.AdminDelete))
 
-	// Admin: report moderation
+	// Admin: report moderation — moderation workflow v2's state machine.
+	// Opening a still-"submitted" report (Get) auto-transitions it to
+	// under_review; every other transition is its own dedicated action
+	// route rather than a generic status setter.
 	mux.Handle("GET /api/v1/admin/reports", requireAdmin(novelReportHandler.List))
 	mux.Handle("GET /api/v1/admin/reports/{id}", requireAdmin(novelReportHandler.Get))
-	mux.Handle("PUT /api/v1/admin/reports/{id}/status", requireAdmin(novelReportHandler.UpdateStatus))
+	mux.Handle("POST /api/v1/admin/reports/{id}/reject", requireAdmin(novelReportHandler.Reject))
+	mux.Handle("POST /api/v1/admin/reports/{id}/resolve", requireAdmin(novelReportHandler.ResolveDirect))
+	mux.Handle("POST /api/v1/admin/reports/{id}/hold-chapter", requireAdmin(novelReportHandler.HoldChapter))
+	mux.Handle("POST /api/v1/admin/reports/{id}/hold-novel", requireAdmin(novelReportHandler.HoldNovel))
+	mux.Handle("GET /api/v1/admin/reports/{id}/moderation-actions", requireAdmin(novelReportHandler.ModerationActions))
+	mux.Handle("GET /api/v1/admin/reports/{id}/release-requests", requireAdmin(novelReportHandler.ReleaseRequestsAdmin))
+	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/approve", requireAdmin(novelReportHandler.ApproveRelease))
+	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/reject", requireAdmin(novelReportHandler.RejectRelease))
 
 	// Admin: author moderation (report detail view's author panel — see
 	// AuthorModerationService's doc comment on why this is name-keyed)
