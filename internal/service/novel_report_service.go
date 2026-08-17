@@ -16,7 +16,8 @@ const maxReportDetailsLength = 2000
 // separate constant since the service package doesn't import handler
 // (wrong dependency direction); enforced again here so a caller that
 // isn't the HTTP handler (impossible today, but this rule lives with
-// the data, not the transport) can't slip past it either.
+// the data, not the transport) can't slip past it either. Reused as
+// the same cap for release-request proof images.
 const maxReportImages = 3
 
 // allowedReportReasons is the fixed, reader-facing set the app's
@@ -31,39 +32,80 @@ var allowedReportReasons = map[string]bool{
 	"other":         true,
 }
 
+// The moderation state machine's full status vocabulary. Every
+// transition is its own method below (MarkUnderReview is private,
+// called automatically from GetDetail) rather than one generic setter
+// — see the package doc on NovelReportService.
+const (
+	statusSubmitted            = "submitted"
+	statusUnderReview          = "under_review"
+	statusRejected             = "rejected"
+	statusChapterOnHold        = "chapter_on_hold"
+	statusNovelOnHold          = "novel_on_hold"
+	statusPendingReleaseReview = "pending_release_review"
+	statusResolved             = "resolved"
+)
+
+// moderation_actions.action_type values — the admin-side audit trail.
+// The author's own step (SubmitReleaseRequest) isn't logged here; the
+// release_requests table is its own audit trail for that half.
+const (
+	actionMarkUnderReview = "mark_under_review"
+	actionRejectReport    = "reject_report"
+	actionHoldChapter     = "hold_chapter"
+	actionHoldNovel       = "hold_novel"
+	actionResolveDirect   = "resolve_direct"
+	actionApproveRelease  = "approve_release"
+	actionRejectRelease   = "reject_release"
+)
+
 // NovelReportService is Book Detail's flag-icon "Report this novel"
-// feature. Unlike comments, this never broadcasts to the app — only
-// the dashboard needs to know a report landed, matching
-// user.registered's dashboard-only realtime shape. The one exception
-// is UpdateStatus, which notifies the single reporting reader (not a
-// broadcast) once an admin actions their report.
+// feature, and — as of the moderation workflow v2 redesign — the full
+// Reporter/Admin/Author state machine described in the moderation
+// spec: every report moves through well-defined statuses, and every
+// transition is its own method that performs the underlying content
+// action (if any), writes a moderation_actions row, and fires the
+// right notifications, all in one place rather than three loosely
+// coordinated call sites.
 type NovelReportService struct {
-	reports       *repository.NovelReportRepository
-	novels        *repository.NovelRepository
-	chapters      *repository.ChapterRepository
-	notifications *repository.NotificationRepository
-	deviceTokens  *repository.DeviceTokenRepository
-	pushNotifier  push.Notifier
-	events        realtime.Publisher
+	reports           *repository.NovelReportRepository
+	novels            *repository.NovelRepository
+	chapters          *repository.ChapterRepository
+	moderationActions *repository.ModerationActionRepository
+	releaseRequests   *repository.ReleaseRequestRepository
+	novelService      *NovelService
+	chapterService    *ChapterService
+	notifications     *repository.NotificationRepository
+	deviceTokens      *repository.DeviceTokenRepository
+	pushNotifier      push.Notifier
+	events            realtime.Publisher
 }
 
 func NewNovelReportService(
 	reports *repository.NovelReportRepository,
 	novels *repository.NovelRepository,
 	chapters *repository.ChapterRepository,
+	moderationActions *repository.ModerationActionRepository,
+	releaseRequests *repository.ReleaseRequestRepository,
+	novelService *NovelService,
+	chapterService *ChapterService,
 	notifications *repository.NotificationRepository,
 	deviceTokens *repository.DeviceTokenRepository,
 	pushNotifier push.Notifier,
 	events realtime.Publisher,
 ) *NovelReportService {
 	return &NovelReportService{
-		reports:       reports,
-		novels:        novels,
-		chapters:      chapters,
-		notifications: notifications,
-		deviceTokens:  deviceTokens,
-		pushNotifier:  pushNotifier,
-		events:        events,
+		reports:           reports,
+		novels:            novels,
+		chapters:          chapters,
+		moderationActions: moderationActions,
+		releaseRequests:   releaseRequests,
+		novelService:      novelService,
+		chapterService:    chapterService,
+		notifications:     notifications,
+		deviceTokens:      deviceTokens,
+		pushNotifier:      pushNotifier,
+		events:            events,
 	}
 }
 
@@ -73,7 +115,8 @@ func NewNovelReportService(
 // only free-text reason); every other reason is self-explanatory as a
 // category and doesn't need one. chapterID is optional — nil means
 // the report is about the whole novel; when given, it must actually
-// belong to novelID.
+// belong to novelID. Confirms receipt to the reporter immediately —
+// "Report submitted" — the first of the spec's reporter notifications.
 func (service *NovelReportService) Create(
 	ctx context.Context, novelID, userID, reason, details string, chapterID *string, imageURLs []string,
 ) (*repository.NovelReport, error) {
@@ -115,12 +158,18 @@ func (service *NovelReportService) Create(
 		report.Images, _ = service.reports.ListImages(ctx, report.ID)
 	}
 	service.events.Publish(realtime.Event{Topic: "report.created", ID: report.ID})
+	service.notifyReporterSubmitted(ctx, report)
 	return report, nil
 }
 
-// GetDetail is the dashboard's single-report view (§ admin report
-// detail) — the list row's data plus its evidence images.
-func (service *NovelReportService) GetDetail(ctx context.Context, reportID string) (*repository.NovelReport, error) {
+// GetDetail is the dashboard's single-report view — the list row's
+// data plus its evidence images. The first time an admin opens a
+// still-"submitted" report, this is also the "admin received the
+// report" moment the spec calls for: it auto-transitions to
+// under_review, notifies the reporter it's under review, and gives the
+// author a neutral heads-up that their content was reported (not a
+// punishment — no hold has happened yet).
+func (service *NovelReportService) GetDetail(ctx context.Context, reportID, adminID string) (*repository.NovelReport, error) {
 	report, err := service.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return nil, err
@@ -129,7 +178,36 @@ func (service *NovelReportService) GetDetail(ctx context.Context, reportID strin
 	if err != nil {
 		return nil, err
 	}
+	report.AdminEvidenceImages, err = service.moderationActions.LatestHoldImages(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+
+	if report.Status == statusSubmitted {
+		report, err = service.markUnderReview(ctx, report, adminID)
+		if err != nil {
+			return nil, err
+		}
+		report.Images, err = service.reports.ListImages(ctx, reportID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return report, nil
+}
+
+func (service *NovelReportService) markUnderReview(ctx context.Context, report *repository.NovelReport, adminID string) (*repository.NovelReport, error) {
+	updated, err := service.reports.SetStatus(ctx, report.ID, statusUnderReview)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.moderationActions.Create(ctx, report.ID, actionMarkUnderReview, adminID, ""); err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: report.ID})
+	service.notifyReporterUnderReview(ctx, updated)
+	service.notifyAuthorInformed(ctx, updated)
+	return updated, nil
 }
 
 // List is the dashboard Reports page's data source — one page,
@@ -183,7 +261,28 @@ func (service *NovelReportService) ListForOwner(ctx context.Context, ownerUserID
 	case pageSize > 100:
 		pageSize = 100
 	}
-	return service.reports.ListForOwner(ctx, ownerUserID, status, page, pageSize)
+	reports, total, err := service.reports.ListForOwner(ctx, ownerUserID, status, page, pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, report := range reports {
+		// Reporter evidence only reaches the author when an admin
+		// explicitly chose to share it at hold time — never automatic
+		// (see HoldChapter/HoldNovel). The admin's own attached evidence
+		// has no such gate: attaching it to a hold *is* the admin
+		// choosing to show the author, so it's always included.
+		if report.ShareReporterEvidence {
+			report.Images, err = service.reports.ListImages(ctx, report.ID)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		report.AdminEvidenceImages, err = service.moderationActions.LatestHoldImages(ctx, report.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	return reports, total, nil
 }
 
 // Delete withdraws the caller's own report — ownership is enforced by
@@ -197,62 +296,37 @@ func (service *NovelReportService) Delete(ctx context.Context, reportID, userID 
 	if err := service.reports.Delete(ctx, reportID, userID); err != nil {
 		return err
 	}
-	// Reuses "report.updated" (no dedicated "report.deleted" topic) —
-	// both sides just refetch their report list/pending-count on this
-	// topic regardless of payload, same as an admin's status change.
 	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
 	return nil
 }
 
-// allowedReportStatuses are admin-settable via UpdateStatus.
-// "resubmitted" is deliberately excluded — a report can only reach
-// that state through the author's own Resubmit call, never directly
-// set by an admin, so the author's step in the loop can't be skipped.
-var allowedReportStatuses = map[string]bool{
-	"pending":         true,
-	"action_required": true,
-	"reviewed":        true,
-	"dismissed":       true,
+// ModerationActions is the drawer's History timeline.
+func (service *NovelReportService) ModerationActions(ctx context.Context, reportID string) ([]*repository.ModerationAction, error) {
+	return service.moderationActions.ListForReport(ctx, reportID)
 }
 
-// UpdateStatus actions a report — the dashboard's moderation button.
-// Moving a report off "pending" notifies the reporting reader (inbox
-// row + best-effort push, deep-linking to the novel) with the admin's
-// note if one was given, or a generic acknowledgement otherwise.
-// "action_required" additionally requires a non-empty note (it's the
-// "what to fix" instruction) and, when the reported novel has a real
-// author account (see migration 0030), notifies that author too —
-// legacy/admin-uploaded novels with no linked account skip that half
-// gracefully, same fallback shape the moderation-panel rework used.
-func (service *NovelReportService) UpdateStatus(ctx context.Context, reportID, status, note, reviewerID string) (*repository.NovelReport, error) {
-	if !allowedReportStatuses[status] {
-		return nil, &ValidationError{Message: "invalid report status"}
-	}
-	note = strings.TrimSpace(note)
-	if status == "action_required" && note == "" {
-		return nil, &ValidationError{Message: "a note describing what to fix is required"}
-	}
-	report, err := service.reports.UpdateStatus(ctx, reportID, status, note, reviewerID)
+// ReleaseRequests is a report's full release-request history — the
+// admin drawer's "pending review" card and the author's Notices page
+// (to show a previous rejection's admin_comment) both read this.
+func (service *NovelReportService) ReleaseRequests(ctx context.Context, reportID string) ([]*repository.ReleaseRequest, error) {
+	requests, err := service.releaseRequests.ListForReport(ctx, reportID)
 	if err != nil {
 		return nil, err
 	}
-	service.events.Publish(realtime.Event{Topic: "report.updated", ID: report.ID})
-
-	if status != "pending" {
-		service.notifyReporter(ctx, report, note)
+	for _, request := range requests {
+		request.Images, err = service.releaseRequests.ListImages(ctx, request.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if status == "action_required" && report.OwnerUserID != nil {
-		service.notifyAuthor(ctx, report, note)
-	}
-	return report, nil
+	return requests, nil
 }
 
-// Resubmit is the author's side of the loop — they've addressed the
-// admin's resolution_note and want it looked at again. Ownership is
-// enforced here (not the repository), same non-leaking 404 shape as
-// loadOwnedNovel: a report that exists but belongs to a novel the
-// caller doesn't own reads identically to one that doesn't exist.
-func (service *NovelReportService) Resubmit(ctx context.Context, reportID, callerUserID, message string) (*repository.NovelReport, error) {
+// ReleaseRequestsForOwner is the author's own report's release-request
+// history — same non-leaking ownership shape as SubmitReleaseRequest,
+// so the author's Notices page can show a previous rejection's
+// admin_comment before they try again.
+func (service *NovelReportService) ReleaseRequestsForOwner(ctx context.Context, reportID, callerUserID string) ([]*repository.ReleaseRequest, error) {
 	report, err := service.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return nil, err
@@ -260,52 +334,374 @@ func (service *NovelReportService) Resubmit(ctx context.Context, reportID, calle
 	if report.OwnerUserID == nil || *report.OwnerUserID != callerUserID {
 		return nil, repository.ErrReportNotFound
 	}
-	if report.Status != "action_required" {
-		return nil, &ValidationError{Message: "this report isn't awaiting a fix"}
-	}
+	return service.ReleaseRequests(ctx, reportID)
+}
 
-	report, err = service.reports.Resubmit(ctx, reportID, strings.TrimSpace(message))
+// Reject is Action A — the report is invalid, nothing to do.
+func (service *NovelReportService) Reject(ctx context.Context, reportID, adminID, notes string) (*repository.NovelReport, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return nil, err
 	}
-	service.events.Publish(realtime.Event{Topic: "report.updated", ID: report.ID})
-	return report, nil
+	if report.Status != statusUnderReview {
+		return nil, &ValidationError{Message: "this report isn't awaiting a decision"}
+	}
+	updated, err := service.reports.UpdateStatus(ctx, reportID, statusRejected, strings.TrimSpace(notes), adminID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.moderationActions.Create(ctx, reportID, actionRejectReport, adminID, notes); err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	service.notifyReporterRejected(ctx, updated, notes)
+	return updated, nil
 }
 
-func (service *NovelReportService) notifyReporter(ctx context.Context, report *repository.NovelReport, note string) {
-	const title = "Your report was reviewed"
-	body := note
+// ResolveDirect closes a report as handled without holding anything —
+// e.g. the admin resolved it out-of-band. Not in the literal spec, but
+// a real everyday need alongside the three named actions.
+func (service *NovelReportService) ResolveDirect(ctx context.Context, reportID, adminID, notes string) (*repository.NovelReport, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.Status != statusUnderReview {
+		return nil, &ValidationError{Message: "this report isn't awaiting a decision"}
+	}
+	updated, err := service.reports.UpdateStatus(ctx, reportID, statusResolved, strings.TrimSpace(notes), adminID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.moderationActions.Create(ctx, reportID, actionResolveDirect, adminID, notes); err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	service.notifyReporterResolved(ctx, updated)
+	service.notifyAuthorResolvedNoAction(ctx, updated)
+	return updated, nil
+}
+
+// HoldChapter is Action B — takes the reported chapter down (via the
+// same ChapterService.UpdateStatus every other unpublish already uses,
+// so realtime/outbox behave identically) and puts the report on hold,
+// atomically, as one admin decision rather than two independent clicks.
+// shareReporterEvidence is the admin's explicit per-hold choice to show
+// the reporter's own evidence images to the author — never automatic,
+// since those images may contain the reporter's own identifying
+// content; see NovelReport.ShareReporterEvidence. adminImageURLs are
+// the admin's own proof, attached to this specific hold decision and
+// always shown to the author once attached (attaching them *is* the
+// admin choosing to share).
+func (service *NovelReportService) HoldChapter(
+	ctx context.Context, reportID, adminID, notes string, shareReporterEvidence bool, adminImageURLs []string,
+) (*repository.NovelReport, error) {
+	notes = strings.TrimSpace(notes)
+	if notes == "" {
+		return nil, &ValidationError{Message: "a note explaining the hold is required"}
+	}
+	if len(adminImageURLs) > maxReportImages {
+		return nil, &ValidationError{Message: fmt.Sprintf("at most %d images allowed", maxReportImages)}
+	}
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.Status != statusUnderReview {
+		return nil, &ValidationError{Message: "this report isn't awaiting a decision"}
+	}
+	if report.ChapterID == nil {
+		return nil, &ValidationError{Message: "this report has no chapter to hold"}
+	}
+	if _, err := service.chapterService.UpdateStatus(ctx, *report.ChapterID, "draft"); err != nil {
+		return nil, err
+	}
+	updated, err := service.reports.UpdateStatus(ctx, reportID, statusChapterOnHold, notes, adminID)
+	if err != nil {
+		return nil, err
+	}
+	if shareReporterEvidence {
+		if err := service.reports.SetShareReporterEvidence(ctx, reportID, true); err != nil {
+			return nil, err
+		}
+		updated.ShareReporterEvidence = true
+	}
+	action, err := service.moderationActions.Create(ctx, reportID, actionHoldChapter, adminID, notes)
+	if err != nil {
+		return nil, err
+	}
+	if len(adminImageURLs) > 0 {
+		if err := service.moderationActions.AddImages(ctx, action.ID, adminImageURLs); err != nil {
+			return nil, err
+		}
+		updated.AdminEvidenceImages = adminImageURLs
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	service.notifyAuthorHold(ctx, updated, "A chapter", notes)
+	return updated, nil
+}
+
+// HoldNovel is Action C — takes the entire novel down (via
+// NovelService.Delete, same soft-delete every other hide already uses).
+// See HoldChapter's doc comment for shareReporterEvidence/adminImageURLs.
+func (service *NovelReportService) HoldNovel(
+	ctx context.Context, reportID, adminID, notes string, shareReporterEvidence bool, adminImageURLs []string,
+) (*repository.NovelReport, error) {
+	notes = strings.TrimSpace(notes)
+	if notes == "" {
+		return nil, &ValidationError{Message: "a note explaining the hold is required"}
+	}
+	if len(adminImageURLs) > maxReportImages {
+		return nil, &ValidationError{Message: fmt.Sprintf("at most %d images allowed", maxReportImages)}
+	}
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.Status != statusUnderReview {
+		return nil, &ValidationError{Message: "this report isn't awaiting a decision"}
+	}
+	if err := service.novelService.Delete(ctx, report.NovelID); err != nil {
+		return nil, err
+	}
+	updated, err := service.reports.UpdateStatus(ctx, reportID, statusNovelOnHold, notes, adminID)
+	if err != nil {
+		return nil, err
+	}
+	if shareReporterEvidence {
+		if err := service.reports.SetShareReporterEvidence(ctx, reportID, true); err != nil {
+			return nil, err
+		}
+		updated.ShareReporterEvidence = true
+	}
+	action, err := service.moderationActions.Create(ctx, reportID, actionHoldNovel, adminID, notes)
+	if err != nil {
+		return nil, err
+	}
+	if len(adminImageURLs) > 0 {
+		if err := service.moderationActions.AddImages(ctx, action.ID, adminImageURLs); err != nil {
+			return nil, err
+		}
+		updated.AdminEvidenceImages = adminImageURLs
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	service.notifyAuthorHold(ctx, updated, "Your novel", notes)
+	return updated, nil
+}
+
+// SubmitReleaseRequest is the author's side of a hold — they've fixed
+// what the hold's note asked for and want it looked at again.
+// Ownership is enforced here (not the repository), same non-leaking
+// 404 shape as loadOwnedNovel: a report that exists but belongs to a
+// novel the caller doesn't own reads identically to one that doesn't
+// exist. Replaces the old bare-message Resubmit — explanation is
+// required and up to maxReportImages proof screenshots are supported,
+// same cap as the original report's own evidence.
+func (service *NovelReportService) SubmitReleaseRequest(
+	ctx context.Context, reportID, callerUserID, explanation string, imageURLs []string,
+) (*repository.NovelReport, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.OwnerUserID == nil || *report.OwnerUserID != callerUserID {
+		return nil, repository.ErrReportNotFound
+	}
+	if report.Status != statusChapterOnHold && report.Status != statusNovelOnHold {
+		return nil, &ValidationError{Message: "this report isn't on hold"}
+	}
+	explanation = strings.TrimSpace(explanation)
+	if explanation == "" {
+		return nil, &ValidationError{Message: "please explain what you fixed"}
+	}
+	if len(imageURLs) > maxReportImages {
+		return nil, &ValidationError{Message: fmt.Sprintf("at most %d images allowed", maxReportImages)}
+	}
+
+	request, err := service.releaseRequests.Create(ctx, reportID, callerUserID, explanation)
+	if err != nil {
+		return nil, err
+	}
+	if len(imageURLs) > 0 {
+		if err := service.releaseRequests.AddImages(ctx, request.ID, imageURLs); err != nil {
+			return nil, err
+		}
+	}
+	updated, err := service.reports.SetStatus(ctx, reportID, statusPendingReleaseReview)
+	if err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	return updated, nil
+}
+
+// ApproveRelease approves the given release request: restores whatever
+// is currently on hold (the novel, if NovelHidden; otherwise the
+// chapter, if its live status is still draft — the report's own
+// current live-state fields already tell us which, no need to guess
+// from history) and resolves the report. Notifies both the author and
+// the original reporter, per the spec.
+func (service *NovelReportService) ApproveRelease(ctx context.Context, reportID, releaseRequestID, adminID, notes string) (*repository.NovelReport, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.Status != statusPendingReleaseReview {
+		return nil, &ValidationError{Message: "this report has no pending release request"}
+	}
+	if err := service.restoreHeldContent(ctx, report); err != nil {
+		return nil, err
+	}
+	if _, err := service.releaseRequests.UpdateStatus(ctx, releaseRequestID, "approved", ""); err != nil {
+		return nil, err
+	}
+	updated, err := service.reports.UpdateStatus(ctx, reportID, statusResolved, strings.TrimSpace(notes), adminID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.moderationActions.Create(ctx, reportID, actionApproveRelease, adminID, notes); err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	service.notifyAuthorResolved(ctx, updated)
+	service.notifyReporterResolved(ctx, updated)
+	return updated, nil
+}
+
+// RejectRelease sends a release request back — the hold stays in
+// effect (content is not restored) and the report reverts to whichever
+// hold status it came from, preserving the original hold reason so the
+// author still sees why, alongside the new rejection comment on the
+// release request itself.
+func (service *NovelReportService) RejectRelease(ctx context.Context, reportID, releaseRequestID, adminID, comment string) (*repository.NovelReport, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.Status != statusPendingReleaseReview {
+		return nil, &ValidationError{Message: "this report has no pending release request"}
+	}
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return nil, &ValidationError{Message: "a comment explaining what's still wrong is required"}
+	}
+	holdStatus := statusChapterOnHold
+	if report.NovelHidden {
+		holdStatus = statusNovelOnHold
+	}
+	if _, err := service.releaseRequests.UpdateStatus(ctx, releaseRequestID, "rejected", comment); err != nil {
+		return nil, err
+	}
+	updated, err := service.reports.UpdateStatus(ctx, reportID, holdStatus, report.ResolutionNote, adminID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.moderationActions.Create(ctx, reportID, actionRejectRelease, adminID, comment); err != nil {
+		return nil, err
+	}
+	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
+	service.notifyAuthorReleaseRejected(ctx, updated, comment)
+	return updated, nil
+}
+
+// restoreHeldContent brings back whatever ApproveRelease's report is
+// currently holding down — the novel takes priority if somehow both
+// look hidden (shouldn't happen: a report only ever holds one thing),
+// otherwise the chapter.
+func (service *NovelReportService) restoreHeldContent(ctx context.Context, report *repository.NovelReport) error {
+	if report.NovelHidden {
+		return service.novelService.Restore(ctx, report.NovelID)
+	}
+	if report.ChapterID != nil && report.ChapterStatus != nil && *report.ChapterStatus == "draft" {
+		_, err := service.chapterService.UpdateStatus(ctx, *report.ChapterID, "published")
+		return err
+	}
+	return nil
+}
+
+func (service *NovelReportService) notify(ctx context.Context, userID, novelID, novelTitle, title, body string) {
+	if err := service.notifications.CreateForUser(ctx, userID, novelID, title, body); err != nil {
+		return
+	}
+	service.events.Publish(realtime.Event{Topic: "notification.new"})
+
+	tokens, err := service.deviceTokens.ListTokensForUser(ctx, userID)
+	if err != nil || len(tokens) == 0 {
+		return
+	}
+	service.pushNotifier.NotifyNovelHighlight(ctx, tokens, novelID, novelTitle, body)
+}
+
+func (service *NovelReportService) notifyReporterSubmitted(ctx context.Context, report *repository.NovelReport) {
+	service.notify(ctx, report.UserID, report.NovelID, report.NovelTitle, "Report submitted",
+		fmt.Sprintf("Thank you for your report on %q. Novelora's moderation team has received it and will review it soon.", report.NovelTitle))
+}
+
+func (service *NovelReportService) notifyReporterUnderReview(ctx context.Context, report *repository.NovelReport) {
+	service.notify(ctx, report.UserID, report.NovelID, report.NovelTitle, "Report under review",
+		fmt.Sprintf("Your report on %q is currently under review by the Novelora moderation team.", report.NovelTitle))
+}
+
+func (service *NovelReportService) notifyReporterRejected(ctx context.Context, report *repository.NovelReport, notes string) {
+	body := strings.TrimSpace(notes)
 	if body == "" {
-		body = fmt.Sprintf("Thanks for flagging \"%s\" — we've reviewed it.", report.NovelTitle)
+		body = fmt.Sprintf("Thanks for flagging %q — after review, no action was needed.", report.NovelTitle)
 	}
-
-	if err := service.notifications.CreateForUser(ctx, report.UserID, report.NovelID, title, body); err != nil {
-		return
-	}
-	service.events.Publish(realtime.Event{Topic: "notification.new"})
-
-	tokens, err := service.deviceTokens.ListTokensForUser(ctx, report.UserID)
-	if err != nil || len(tokens) == 0 {
-		return
-	}
-	service.pushNotifier.NotifyNovelHighlight(ctx, tokens, report.NovelID, report.NovelTitle, body)
+	service.notify(ctx, report.UserID, report.NovelID, report.NovelTitle, "Report reviewed", body)
 }
 
-// notifyAuthor tells the novel's real author account that a report
-// against their novel needs action — only called when one exists (see
-// UpdateStatus). Same dual-path (inbox + best-effort push) shape as
-// notifyReporter.
-func (service *NovelReportService) notifyAuthor(ctx context.Context, report *repository.NovelReport, note string) {
-	title := fmt.Sprintf("Action needed on \"%s\"", report.NovelTitle)
+func (service *NovelReportService) notifyReporterResolved(ctx context.Context, report *repository.NovelReport) {
+	service.notify(ctx, report.UserID, report.NovelID, report.NovelTitle, "Report resolved",
+		fmt.Sprintf("Your report on %q has been resolved — appropriate action has been taken.", report.NovelTitle))
+}
 
-	if err := service.notifications.CreateForUser(ctx, *report.OwnerUserID, report.NovelID, title, note); err != nil {
+// notifyAuthorInformed is the spec's "this is NOT a punishment" step —
+// fires once, the first time an admin opens the report, independent of
+// whatever decision follows.
+func (service *NovelReportService) notifyAuthorInformed(ctx context.Context, report *repository.NovelReport) {
+	if report.OwnerUserID == nil {
 		return
 	}
-	service.events.Publish(realtime.Event{Topic: "notification.new"})
+	detail := report.Details
+	if detail == "" {
+		detail = "No additional details were provided."
+	}
+	body := fmt.Sprintf("A reader reported %q (reason: %s). %s No action has been taken yet — this is just to keep you informed.",
+		report.NovelTitle, report.Reason, detail)
+	service.notify(ctx, *report.OwnerUserID, report.NovelID, report.NovelTitle,
+		fmt.Sprintf("Your novel %q was reported", report.NovelTitle), body)
+}
 
-	tokens, err := service.deviceTokens.ListTokensForUser(ctx, *report.OwnerUserID)
-	if err != nil || len(tokens) == 0 {
+func (service *NovelReportService) notifyAuthorHold(ctx context.Context, report *repository.NovelReport, what, notes string) {
+	if report.OwnerUserID == nil {
 		return
 	}
-	service.pushNotifier.NotifyNovelHighlight(ctx, tokens, report.NovelID, report.NovelTitle, note)
+	service.notify(ctx, *report.OwnerUserID, report.NovelID, report.NovelTitle,
+		fmt.Sprintf("%s of %q was placed on hold", what, report.NovelTitle), notes)
+}
+
+func (service *NovelReportService) notifyAuthorReleaseRejected(ctx context.Context, report *repository.NovelReport, comment string) {
+	if report.OwnerUserID == nil {
+		return
+	}
+	service.notify(ctx, *report.OwnerUserID, report.NovelID, report.NovelTitle,
+		fmt.Sprintf("Release request for %q needs more work", report.NovelTitle), comment)
+}
+
+func (service *NovelReportService) notifyAuthorResolved(ctx context.Context, report *repository.NovelReport) {
+	if report.OwnerUserID == nil {
+		return
+	}
+	service.notify(ctx, *report.OwnerUserID, report.NovelID, report.NovelTitle,
+		fmt.Sprintf("%q is live again", report.NovelTitle),
+		"Your release request was approved — the content is visible to readers again.")
+}
+
+func (service *NovelReportService) notifyAuthorResolvedNoAction(ctx context.Context, report *repository.NovelReport) {
+	if report.OwnerUserID == nil {
+		return
+	}
+	service.notify(ctx, *report.OwnerUserID, report.NovelID, report.NovelTitle,
+		fmt.Sprintf("Report about %q resolved", report.NovelTitle),
+		"The report was reviewed and closed — no action was needed.")
 }

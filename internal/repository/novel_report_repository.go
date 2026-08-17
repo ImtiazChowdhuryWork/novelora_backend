@@ -20,10 +20,10 @@ var ErrReportNotFound = errors.New("report not found")
 // ListImages) — never by scanReport — same "attach after" shape as
 // NovelComment.Replies.
 type NovelReport struct {
-	ID             string
-	NovelID        string
-	NovelTitle     string
-	AuthorName     string
+	ID         string
+	NovelID    string
+	NovelTitle string
+	AuthorName string
 	// OwnerUserID is the novel's real author account, if it has one
 	// (nil for admin-uploaded/unclaimed novels) — see migration 0030.
 	// Lets the moderation panel key off the real account when possible
@@ -59,6 +59,26 @@ type NovelReport struct {
 	// only ever offering the one-way action.
 	ChapterStatus *string
 	NovelHidden   bool
+	// ShareReporterEvidence is set once, at hold time (see
+	// NovelReportService.HoldChapter/HoldNovel) — an admin's explicit
+	// per-hold choice, never automatic, since the reporter's images may
+	// contain the reporter's own identifying content. Gates whether
+	// ListForOwner populates Images for the author; GetDetail (the
+	// admin's own view) always populates Images regardless. Lives on the
+	// report row (one flag, not one per hold) because the current state
+	// machine only ever lets a report be held once — under_review is the
+	// only status HoldChapter/HoldNovel accept from, and there's no path
+	// back to under_review after a hold. If that ever changes, this
+	// needs to move onto moderation_actions/moderation_action_images to
+	// stay correctly scoped to one hold instead of the whole report.
+	ShareReporterEvidence bool
+	// AdminEvidenceImages is the admin's own proof attached to whichever
+	// hold_chapter/hold_novel moderation action is this report's most
+	// recent — separate from the reporter's Images, always shown to the
+	// author once attached (the admin chose to attach them specifically
+	// to show the author, unlike the reporter's evidence). Populated by
+	// ModerationActionRepository.LatestHoldImages, not scanReport.
+	AdminEvidenceImages []string
 }
 
 // NovelReportImage is one screenshot attached as evidence — up to
@@ -84,7 +104,7 @@ const reportColumns = `
 	r.status, r.resolution_note, r.author_response, r.reviewed_by, coalesce(reviewer.username, ''),
 	r.reviewed_at, r.created_at,
 	(SELECT count(*) FROM novel_report_images ri WHERE ri.report_id = r.id),
-	c.status, (n.deleted_at IS NOT NULL)`
+	c.status, (n.deleted_at IS NOT NULL), r.share_reporter_evidence`
 
 func scanReport(row pgx.Row) (*NovelReport, error) {
 	report := &NovelReport{}
@@ -93,7 +113,7 @@ func scanReport(row pgx.Row) (*NovelReport, error) {
 		&report.Reason, &report.Details, &report.ChapterID, &report.ChapterTitle,
 		&report.Status, &report.ResolutionNote, &report.AuthorResponse, &report.ReviewedBy, &report.ReviewedByName,
 		&report.ReviewedAt, &report.CreatedAt, &report.ImageCount,
-		&report.ChapterStatus, &report.NovelHidden,
+		&report.ChapterStatus, &report.NovelHidden, &report.ShareReporterEvidence,
 	)
 	return report, err
 }
@@ -200,13 +220,13 @@ func (repository *NovelReportRepository) List(ctx context.Context, status string
 	return reports, total, rows.Err()
 }
 
-// CountPending backs the Overview page's pending-reports tile — counts
-// every status that still needs an admin to look at it, not just the
-// initial "pending" (a resubmitted report needs attention just as much).
+// CountPending backs the Overview page's pending-reports tile — every
+// status short of the two terminal ones (resolved/rejected) still
+// needs an admin to look at it.
 func (repository *NovelReportRepository) CountPending(ctx context.Context) (int, error) {
 	var count int
 	err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports WHERE status IN ('pending', 'action_required', 'resubmitted')").Scan(&count)
+		"SELECT count(*) FROM novel_reports WHERE status NOT IN ('resolved', 'rejected')").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count pending reports: %w", err)
 	}
@@ -242,22 +262,34 @@ func (repository *NovelReportRepository) UpdateStatus(ctx context.Context, repor
 	return repository.GetByID(ctx, reportID)
 }
 
-// Resubmit is the author's side of the loop: they've fixed whatever
-// the admin's resolution_note asked for and want it re-reviewed.
-// Deliberately leaves resolution_note/reviewed_by/reviewed_at
-// untouched, so the admin's original instruction stays visible right
-// alongside the author's response.
-func (repository *NovelReportRepository) Resubmit(ctx context.Context, reportID, authorResponse string) (*NovelReport, error) {
-	commandTag, err := repository.pool.Exec(ctx, `
-		UPDATE novel_reports SET status = 'resubmitted', author_response = $2
-		WHERE id = $1`, reportID, authorResponse)
+// SetStatus is a bare status transition for moves that shouldn't touch
+// resolution_note/reviewed_by — UpdateStatus's non-pending branch
+// always overwrites both, which is right for an admin decision but
+// wrong for the automatic submitted->under_review step and the
+// author's own SubmitReleaseRequest (their explanation lives on
+// release_requests now, not this row).
+func (repository *NovelReportRepository) SetStatus(ctx context.Context, reportID, status string) (*NovelReport, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET status = $2 WHERE id = $1", reportID, status)
 	if err != nil {
-		return nil, fmt.Errorf("resubmit report: %w", err)
+		return nil, fmt.Errorf("set report status: %w", err)
 	}
 	if commandTag.RowsAffected() == 0 {
 		return nil, ErrReportNotFound
 	}
 	return repository.GetByID(ctx, reportID)
+}
+
+// SetShareReporterEvidence records the admin's per-hold choice to show
+// the reporter's evidence images to the author — see HoldChapter/
+// HoldNovel. Only ever called with true (the column's own DEFAULT
+// false covers "no").
+func (repository *NovelReportRepository) SetShareReporterEvidence(ctx context.Context, reportID string, share bool) error {
+	if _, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET share_reporter_evidence = $2 WHERE id = $1", reportID, share); err != nil {
+		return fmt.Errorf("set share reporter evidence: %w", err)
+	}
+	return nil
 }
 
 // ListForOwner is the author-facing "Notices" list — every report
