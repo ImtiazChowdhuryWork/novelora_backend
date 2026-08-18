@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/push"
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/realtime"
@@ -303,6 +304,46 @@ func (service *NovelReportService) Delete(ctx context.Context, reportID, userID 
 // ModerationActions is the drawer's History timeline.
 func (service *NovelReportService) ModerationActions(ctx context.Context, reportID string) ([]*repository.ModerationAction, error) {
 	return service.moderationActions.ListForReport(ctx, reportID)
+}
+
+// ModerationActionsForOwner is ModerationActions scoped to a report the
+// caller's novel actually owns — the author dashboard's own history
+// timeline, same ownership check as ReleaseRequestsForOwner.
+func (service *NovelReportService) ModerationActionsForOwner(ctx context.Context, reportID, callerUserID string) ([]*repository.ModerationAction, error) {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if report.OwnerUserID == nil || *report.OwnerUserID != callerUserID {
+		return nil, repository.ErrReportNotFound
+	}
+	return service.ModerationActions(ctx, reportID)
+}
+
+// AdminDelete soft-deletes a report from the admin Reports list.
+// Refused while a report is actively holding content down (or awaiting
+// the admin's own decision on a release request) — deleting one of
+// those would strand the hold: the chapter/novel would stay hidden
+// with nothing left explaining why, and no report for the author to
+// request a release against. Deleting a submitted/under_review/
+// rejected/resolved report is always safe — none of those states have
+// anything currently depending on the row's continued existence.
+func (service *NovelReportService) AdminDelete(ctx context.Context, reportID string) error {
+	report, err := service.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return err
+	}
+	switch report.Status {
+	case statusChapterOnHold, statusNovelOnHold, statusPendingReleaseReview:
+		return &ValidationError{Message: "can't delete a report that's currently holding content — resolve or approve/reject the release first"}
+	}
+	return service.reports.SoftDelete(ctx, reportID)
+}
+
+// PurgeOldDeleted hard-deletes reports soft-deleted more than 30 days
+// ago — see runReportPurgeTicker in main.go.
+func (service *NovelReportService) PurgeOldDeleted(ctx context.Context) (int, error) {
+	return service.reports.PurgeDeletedBefore(ctx, time.Now().AddDate(0, 0, -30))
 }
 
 // ReleaseRequests is a report's full release-request history — the

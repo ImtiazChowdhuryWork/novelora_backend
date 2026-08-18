@@ -193,7 +193,7 @@ func (repository *NovelReportRepository) ListImages(ctx context.Context, reportI
 func (repository *NovelReportRepository) List(ctx context.Context, status string, page, pageSize int) ([]*NovelReport, int, error) {
 	var total int
 	if err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports r WHERE ($1 = '' OR r.status = $1)",
+		"SELECT count(*) FROM novel_reports r WHERE r.deleted_at IS NULL AND ($1 = '' OR r.status = $1)",
 		status).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count reports: %w", err)
 	}
@@ -201,7 +201,7 @@ func (repository *NovelReportRepository) List(ctx context.Context, status string
 	rows, err := repository.pool.Query(ctx, `
 		SELECT `+reportColumns+`
 		FROM `+reportFromClause+`
-		WHERE ($1 = '' OR r.status = $1)
+		WHERE r.deleted_at IS NULL AND ($1 = '' OR r.status = $1)
 		ORDER BY r.created_at DESC
 		LIMIT $2 OFFSET $3`, status, pageSize, (page-1)*pageSize)
 	if err != nil {
@@ -226,7 +226,7 @@ func (repository *NovelReportRepository) List(ctx context.Context, status string
 func (repository *NovelReportRepository) CountPending(ctx context.Context) (int, error) {
 	var count int
 	err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports WHERE status NOT IN ('resolved', 'rejected')").Scan(&count)
+		"SELECT count(*) FROM novel_reports WHERE deleted_at IS NULL AND status NOT IN ('resolved', 'rejected')").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count pending reports: %w", err)
 	}
@@ -299,7 +299,7 @@ func (repository *NovelReportRepository) ListForOwner(ctx context.Context, owner
 	var total int
 	if err := repository.pool.QueryRow(ctx, `
 		SELECT count(*) FROM novel_reports r JOIN novels n ON n.id = r.novel_id
-		WHERE n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)`,
+		WHERE r.deleted_at IS NULL AND n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)`,
 		ownerUserID, status).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count owner reports: %w", err)
 	}
@@ -307,7 +307,7 @@ func (repository *NovelReportRepository) ListForOwner(ctx context.Context, owner
 	rows, err := repository.pool.Query(ctx, `
 		SELECT `+reportColumns+`
 		FROM `+reportFromClause+`
-		WHERE n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)
+		WHERE r.deleted_at IS NULL AND n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)
 		ORDER BY r.created_at DESC
 		LIMIT $3 OFFSET $4`, ownerUserID, status, pageSize, (page-1)*pageSize)
 	if err != nil {
@@ -389,6 +389,36 @@ func (repository *NovelReportRepository) HasReported(ctx context.Context, novelI
 	return exists, nil
 }
 
+// SoftDelete hides a report from every work-queue list (List,
+// ListForOwner, ListForUser, CountPending) without erasing it —
+// ListForAuthorName/ListForOwnerAll deliberately stay unfiltered, since
+// those back the admin's own "other reports against this author"
+// history panel, where a deleted report is still useful context. See
+// PurgeDeletedBefore for the eventual hard delete.
+func (repository *NovelReportRepository) SoftDelete(ctx context.Context, reportID string) error {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", reportID)
+	if err != nil {
+		return fmt.Errorf("soft delete report: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrReportNotFound
+	}
+	return nil
+}
+
+// PurgeDeletedBefore permanently removes any report soft-deleted before
+// cutoff — see runReportPurgeTicker in main.go. Evidence images cascade
+// via ON DELETE CASCADE, same as NovelReportRepository.Delete.
+func (repository *NovelReportRepository) PurgeDeletedBefore(ctx context.Context, cutoff time.Time) (int, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"DELETE FROM novel_reports WHERE deleted_at IS NOT NULL AND deleted_at < $1", cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge deleted reports: %w", err)
+	}
+	return int(commandTag.RowsAffected()), nil
+}
+
 // HasActiveChapterHold reports whether a chapter is currently under an
 // admin hold the author hasn't cleared — either on hold outright, or
 // awaiting the admin's decision on a submitted release request. Either
@@ -410,14 +440,14 @@ func (repository *NovelReportRepository) HasActiveChapterHold(ctx context.Contex
 func (repository *NovelReportRepository) ListForUser(ctx context.Context, userID string, page, pageSize int) ([]*NovelReport, int, error) {
 	var total int
 	if err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports WHERE user_id = $1", userID).Scan(&total); err != nil {
+		"SELECT count(*) FROM novel_reports WHERE deleted_at IS NULL AND user_id = $1", userID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count user reports: %w", err)
 	}
 
 	rows, err := repository.pool.Query(ctx, `
 		SELECT `+reportColumns+`
 		FROM `+reportFromClause+`
-		WHERE r.user_id = $1
+		WHERE r.deleted_at IS NULL AND r.user_id = $1
 		ORDER BY r.created_at DESC
 		LIMIT $2 OFFSET $3`, userID, pageSize, (page-1)*pageSize)
 	if err != nil {

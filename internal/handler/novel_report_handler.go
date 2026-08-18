@@ -131,6 +131,25 @@ func newModerationActionResponse(action *repository.ModerationAction) moderation
 	}
 }
 
+// authorModerationActionResponse is moderationActionResponse without
+// AdminName — the author's own timeline (see ModerationActionsForOwner)
+// shows what happened and when, not which staff account did it.
+type authorModerationActionResponse struct {
+	ID         string    `json:"id"`
+	ActionType string    `json:"action_type"`
+	Notes      string    `json:"notes"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func newAuthorModerationActionResponse(action *repository.ModerationAction) authorModerationActionResponse {
+	return authorModerationActionResponse{
+		ID:         action.ID,
+		ActionType: action.ActionType,
+		Notes:      action.Notes,
+		CreatedAt:  action.CreatedAt,
+	}
+}
+
 type releaseRequestResponse struct {
 	ID           string     `json:"id"`
 	ReportID     string     `json:"report_id"`
@@ -376,6 +395,19 @@ func (handler *NovelReportHandler) ModerationActions(responseWriter http.Respons
 	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items})
 }
 
+// AdminDelete: DELETE /admin/reports/{id} — soft delete, refused while
+// the report is actively holding content (see NovelReportService.
+// AdminDelete). A background ticker hard-deletes it 30 days later.
+func (handler *NovelReportHandler) AdminDelete(responseWriter http.ResponseWriter, request *http.Request) {
+	if err := handler.reports.AdminDelete(request.Context(), request.PathValue("id")); err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	handler.auditLogger.Log(actorID, actorName, "report.deleted", "report", request.PathValue("id"), nil)
+	responseWriter.WriteHeader(http.StatusNoContent)
+}
+
 // ReleaseRequestsAdmin: GET /admin/reports/{id}/release-requests
 func (handler *NovelReportHandler) ReleaseRequestsAdmin(responseWriter http.ResponseWriter, request *http.Request) {
 	requests, err := handler.reports.ReleaseRequests(request.Context(), request.PathValue("id"))
@@ -448,6 +480,23 @@ func (handler *NovelReportHandler) ReleaseRequestsForOwner(responseWriter http.R
 	items := make([]releaseRequestResponse, 0, len(requests))
 	for _, req := range requests {
 		items = append(items, newReleaseRequestResponse(req))
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items})
+}
+
+// ModerationActionsForOwner: GET /author/reports/{id}/moderation-actions
+// — the author dashboard's own report timeline. Requires the
+// RequireAuthor middleware.
+func (handler *NovelReportHandler) ModerationActionsForOwner(responseWriter http.ResponseWriter, request *http.Request) {
+	callerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)
+	actions, err := handler.reports.ModerationActionsForOwner(request.Context(), request.PathValue("id"), callerUserID)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	items := make([]authorModerationActionResponse, 0, len(actions))
+	for _, action := range actions {
+		items = append(items, newAuthorModerationActionResponse(action))
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items})
 }

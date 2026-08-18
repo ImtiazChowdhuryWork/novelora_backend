@@ -110,6 +110,7 @@ func main() {
 		moderationActionRepository, releaseRequestRepository, novelService, chapterService,
 		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
 	authorModerationService := service.NewAuthorModerationService(novelRepository, authorStrikeRepository, novelReportRepository, eventHub)
+	go runReportPurgeTicker(novelReportService)
 
 	rankingNotificationService := service.NewRankingNotificationService(
 		discoverSectionService, sectionMembershipRepository,
@@ -263,6 +264,7 @@ func main() {
 	mux.Handle("DELETE /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Delete))
 	mux.Handle("GET /api/v1/author/reports", requireAuthor(novelReportHandler.ListForOwner))
 	mux.Handle("GET /api/v1/author/reports/{id}/release-requests", requireAuthor(novelReportHandler.ReleaseRequestsForOwner))
+	mux.Handle("GET /api/v1/author/reports/{id}/moderation-actions", requireAuthor(novelReportHandler.ModerationActionsForOwner))
 	mux.Handle("POST /api/v1/author/reports/{id}/release-requests", requireAuthor(novelReportHandler.SubmitReleaseRequest))
 
 	// Admin: comment moderation
@@ -283,6 +285,7 @@ func main() {
 	mux.Handle("GET /api/v1/admin/reports/{id}/release-requests", requireAdmin(novelReportHandler.ReleaseRequestsAdmin))
 	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/approve", requireAdmin(novelReportHandler.ApproveRelease))
 	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/reject", requireAdmin(novelReportHandler.RejectRelease))
+	mux.Handle("DELETE /api/v1/admin/reports/{id}", requireAdmin(novelReportHandler.AdminDelete))
 
 	// Admin: author moderation (report detail view's author panel — see
 	// AuthorModerationService's doc comment on why this is name-keyed)
@@ -399,6 +402,24 @@ func runRankingDetectionTicker(rankingService *service.RankingNotificationServic
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		rankingService.DetectAndNotify(ctx)
 		cancel()
+	}
+}
+
+// runReportPurgeTicker hard-deletes reports soft-deleted more than 30
+// days ago (see NovelReportService.AdminDelete/PurgeOldDeleted). Once a
+// day is plenty — the 30-day threshold is never urgent to the hour.
+func runReportPurgeTicker(reports *service.NovelReportService) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		purged, err := reports.PurgeOldDeleted(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("reports: purge old deleted failed: %v", err)
+		} else if purged > 0 {
+			log.Printf("reports: purged %d report(s) deleted more than 30 days ago", purged)
+		}
 	}
 }
 
