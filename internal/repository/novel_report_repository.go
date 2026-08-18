@@ -79,6 +79,9 @@ type NovelReport struct {
 	// to show the author, unlike the reporter's evidence). Populated by
 	// ModerationActionRepository.LatestHoldImages, not scanReport.
 	AdminEvidenceImages []string
+	// CoverURL is the reported novel's own cover — lets the admin
+	// Reports table show a thumbnail instead of just the title text.
+	CoverURL string
 }
 
 // NovelReportImage is one screenshot attached as evidence — up to
@@ -104,7 +107,7 @@ const reportColumns = `
 	r.status, r.resolution_note, r.author_response, r.reviewed_by, coalesce(reviewer.username, ''),
 	r.reviewed_at, r.created_at,
 	(SELECT count(*) FROM novel_report_images ri WHERE ri.report_id = r.id),
-	c.status, (n.deleted_at IS NOT NULL), r.share_reporter_evidence`
+	c.status, (n.deleted_at IS NOT NULL), r.share_reporter_evidence, coalesce(n.cover_url, '')`
 
 func scanReport(row pgx.Row) (*NovelReport, error) {
 	report := &NovelReport{}
@@ -113,7 +116,7 @@ func scanReport(row pgx.Row) (*NovelReport, error) {
 		&report.Reason, &report.Details, &report.ChapterID, &report.ChapterTitle,
 		&report.Status, &report.ResolutionNote, &report.AuthorResponse, &report.ReviewedBy, &report.ReviewedByName,
 		&report.ReviewedAt, &report.CreatedAt, &report.ImageCount,
-		&report.ChapterStatus, &report.NovelHidden, &report.ShareReporterEvidence,
+		&report.ChapterStatus, &report.NovelHidden, &report.ShareReporterEvidence, &report.CoverURL,
 	)
 	return report, err
 }

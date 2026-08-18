@@ -301,9 +301,22 @@ func (service *NovelReportService) Delete(ctx context.Context, reportID, userID 
 	return nil
 }
 
-// ModerationActions is the drawer's History timeline.
+// ModerationActions is the drawer's History timeline — each action's
+// own attached evidence (if any) comes along too, so an approve/reject
+// decision's proof shows inline at the step it was attached, not just
+// a hold's.
 func (service *NovelReportService) ModerationActions(ctx context.Context, reportID string) ([]*repository.ModerationAction, error) {
-	return service.moderationActions.ListForReport(ctx, reportID)
+	actions, err := service.moderationActions.ListForReport(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	for _, action := range actions {
+		action.Images, err = service.moderationActions.ListImages(ctx, action.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return actions, nil
 }
 
 // ModerationActionsForOwner is ModerationActions scoped to a report the
@@ -603,7 +616,12 @@ func (service *NovelReportService) SubmitReleaseRequest(
 // current live-state fields already tell us which, no need to guess
 // from history) and resolves the report. Notifies both the author and
 // the original reporter, per the spec.
-func (service *NovelReportService) ApproveRelease(ctx context.Context, reportID, releaseRequestID, adminID, notes string) (*repository.NovelReport, error) {
+func (service *NovelReportService) ApproveRelease(
+	ctx context.Context, reportID, releaseRequestID, adminID, notes string, adminImageURLs []string,
+) (*repository.NovelReport, error) {
+	if len(adminImageURLs) > maxReportImages {
+		return nil, &ValidationError{Message: fmt.Sprintf("at most %d images allowed", maxReportImages)}
+	}
 	report, err := service.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return nil, err
@@ -621,8 +639,14 @@ func (service *NovelReportService) ApproveRelease(ctx context.Context, reportID,
 	if err != nil {
 		return nil, err
 	}
-	if _, err := service.moderationActions.Create(ctx, reportID, actionApproveRelease, adminID, notes); err != nil {
+	action, err := service.moderationActions.Create(ctx, reportID, actionApproveRelease, adminID, notes)
+	if err != nil {
 		return nil, err
+	}
+	if len(adminImageURLs) > 0 {
+		if err := service.moderationActions.AddImages(ctx, action.ID, adminImageURLs); err != nil {
+			return nil, err
+		}
 	}
 	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
 	service.notifyAuthorResolved(ctx, updated)
@@ -635,7 +659,12 @@ func (service *NovelReportService) ApproveRelease(ctx context.Context, reportID,
 // hold status it came from, preserving the original hold reason so the
 // author still sees why, alongside the new rejection comment on the
 // release request itself.
-func (service *NovelReportService) RejectRelease(ctx context.Context, reportID, releaseRequestID, adminID, comment string) (*repository.NovelReport, error) {
+func (service *NovelReportService) RejectRelease(
+	ctx context.Context, reportID, releaseRequestID, adminID, comment string, adminImageURLs []string,
+) (*repository.NovelReport, error) {
+	if len(adminImageURLs) > maxReportImages {
+		return nil, &ValidationError{Message: fmt.Sprintf("at most %d images allowed", maxReportImages)}
+	}
 	report, err := service.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return nil, err
@@ -658,8 +687,14 @@ func (service *NovelReportService) RejectRelease(ctx context.Context, reportID, 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := service.moderationActions.Create(ctx, reportID, actionRejectRelease, adminID, comment); err != nil {
+	action, err := service.moderationActions.Create(ctx, reportID, actionRejectRelease, adminID, comment)
+	if err != nil {
 		return nil, err
+	}
+	if len(adminImageURLs) > 0 {
+		if err := service.moderationActions.AddImages(ctx, action.ID, adminImageURLs); err != nil {
+			return nil, err
+		}
 	}
 	service.events.Publish(realtime.Event{Topic: "report.updated", ID: reportID})
 	service.notifyAuthorReleaseRejected(ctx, updated, comment)

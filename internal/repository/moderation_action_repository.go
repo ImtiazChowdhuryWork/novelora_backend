@@ -21,6 +21,11 @@ type ModerationAction struct {
 	AdminName  string
 	Notes      string
 	CreatedAt  time.Time
+	// Images is never scanned by the row query — same "attach after"
+	// shape as NovelReport.Images/AdminEvidenceImages — populated by
+	// NovelReportService.ModerationActions via ListImages, one query
+	// per action (small N, same tradeoff ReleaseRequests already makes).
+	Images []string
 }
 
 type ModerationActionRepository struct {
@@ -92,6 +97,30 @@ func (repository *ModerationActionRepository) LatestHoldImages(ctx context.Conte
 		ORDER BY i.created_at ASC`, reportID)
 	if err != nil {
 		return nil, fmt.Errorf("list latest hold images: %w", err)
+	}
+	defer rows.Close()
+
+	urls := []string{}
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			return nil, fmt.Errorf("scan moderation action image: %w", err)
+		}
+		urls = append(urls, url)
+	}
+	return urls, rows.Err()
+}
+
+// ListImages returns one action's own attached evidence, oldest first
+// — unlike LatestHoldImages (scoped to whichever hold is currently in
+// effect), this is per-action, so the History timeline can show what
+// was attached at each step, not just the most recent hold.
+func (repository *ModerationActionRepository) ListImages(ctx context.Context, actionID string) ([]string, error) {
+	rows, err := repository.pool.Query(ctx,
+		"SELECT image_url FROM moderation_action_images WHERE moderation_action_id = $1 ORDER BY created_at ASC",
+		actionID)
+	if err != nil {
+		return nil, fmt.Errorf("list moderation action images: %w", err)
 	}
 	defer rows.Close()
 

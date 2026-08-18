@@ -74,6 +74,7 @@ type reportResponse struct {
 	CreatedAt           time.Time  `json:"created_at"`
 	ChapterStatus       *string    `json:"chapter_status"`
 	NovelHidden         bool       `json:"novel_hidden"`
+	CoverURL            string     `json:"cover_url"`
 }
 
 func newReportResponse(report *repository.NovelReport) reportResponse {
@@ -108,6 +109,7 @@ func newReportResponse(report *repository.NovelReport) reportResponse {
 		CreatedAt:           report.CreatedAt,
 		ChapterStatus:       report.ChapterStatus,
 		NovelHidden:         report.NovelHidden,
+		CoverURL:            report.CoverURL,
 	}
 }
 
@@ -118,9 +120,14 @@ type moderationActionResponse struct {
 	AdminName  string    `json:"admin_name"`
 	Notes      string    `json:"notes"`
 	CreatedAt  time.Time `json:"created_at"`
+	Images     []string  `json:"images"`
 }
 
 func newModerationActionResponse(action *repository.ModerationAction) moderationActionResponse {
+	images := action.Images
+	if images == nil {
+		images = []string{}
+	}
 	return moderationActionResponse{
 		ID:         action.ID,
 		ReportID:   action.ReportID,
@@ -128,6 +135,7 @@ func newModerationActionResponse(action *repository.ModerationAction) moderation
 		AdminName:  action.AdminName,
 		Notes:      action.Notes,
 		CreatedAt:  action.CreatedAt,
+		Images:     images,
 	}
 }
 
@@ -139,14 +147,20 @@ type authorModerationActionResponse struct {
 	ActionType string    `json:"action_type"`
 	Notes      string    `json:"notes"`
 	CreatedAt  time.Time `json:"created_at"`
+	Images     []string  `json:"images"`
 }
 
 func newAuthorModerationActionResponse(action *repository.ModerationAction) authorModerationActionResponse {
+	images := action.Images
+	if images == nil {
+		images = []string{}
+	}
 	return authorModerationActionResponse{
 		ID:         action.ID,
 		ActionType: action.ActionType,
 		Notes:      action.Notes,
 		CreatedAt:  action.CreatedAt,
+		Images:     images,
 	}
 }
 
@@ -343,14 +357,21 @@ func (handler *NovelReportHandler) HoldNovel(responseWriter http.ResponseWriter,
 }
 
 // ApproveRelease: POST /admin/reports/{id}/release-requests/{requestId}/approve
+// — multipart form (notes, up to 3 files under "images" — the admin's
+// own proof for approving, same optional-evidence shape HoldChapter/
+// HoldNovel already have).
 func (handler *NovelReportHandler) ApproveRelease(responseWriter http.ResponseWriter, request *http.Request) {
-	var body moderationDecisionRequest
-	if !decodeJSON(responseWriter, request, &body) {
+	imageURLs, err := saveUploadedReportImages(
+		request, "images", handler.holdImagesDir, handler.holdImagesPrefix, uuid.NewString())
+	if err != nil {
+		writeImageUploadError(responseWriter, err)
 		return
 	}
+
+	notes := request.FormValue("notes")
 	actorID, actorName := actorFromContext(request.Context())
 	report, err := handler.reports.ApproveRelease(
-		request.Context(), request.PathValue("id"), request.PathValue("requestId"), actorID, body.Notes)
+		request.Context(), request.PathValue("id"), request.PathValue("requestId"), actorID, notes, imageURLs)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
@@ -359,19 +380,20 @@ func (handler *NovelReportHandler) ApproveRelease(responseWriter http.ResponseWr
 	writeJSON(responseWriter, http.StatusOK, newReportResponse(report))
 }
 
-type rejectReleaseRequest struct {
-	Comment string `json:"comment"`
-}
-
 // RejectRelease: POST /admin/reports/{id}/release-requests/{requestId}/reject
+// — multipart form (comment, up to 3 files under "images"), same shape as ApproveRelease.
 func (handler *NovelReportHandler) RejectRelease(responseWriter http.ResponseWriter, request *http.Request) {
-	var body rejectReleaseRequest
-	if !decodeJSON(responseWriter, request, &body) {
+	imageURLs, err := saveUploadedReportImages(
+		request, "images", handler.holdImagesDir, handler.holdImagesPrefix, uuid.NewString())
+	if err != nil {
+		writeImageUploadError(responseWriter, err)
 		return
 	}
+
+	comment := request.FormValue("comment")
 	actorID, actorName := actorFromContext(request.Context())
 	report, err := handler.reports.RejectRelease(
-		request.Context(), request.PathValue("id"), request.PathValue("requestId"), actorID, body.Comment)
+		request.Context(), request.PathValue("id"), request.PathValue("requestId"), actorID, comment, imageURLs)
 	if err != nil {
 		writeServiceError(responseWriter, err)
 		return
