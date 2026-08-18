@@ -13,6 +13,11 @@ import (
 
 var ErrNovelNotFound = errors.New("novel not found")
 
+// ErrIncludeHiddenWithoutOwner guards IncludeHidden from ever running
+// unscoped — without OwnerUserID it would surface every author's hidden
+// novels, not just one caller's own.
+var ErrIncludeHiddenWithoutOwner = errors.New("IncludeHidden requires OwnerUserID")
+
 // minTrustedRatingCount is Phase 5b's threshold: below this many real
 // votes, a novel's average_rating isn't trusted for sorting/display
 // purposes yet — the admin-typed rating is used instead, same as an
@@ -60,6 +65,12 @@ type Novel struct {
 	// Genres is populated by NovelService, not this repository — see
 	// GenreRepository.ListForNovel(s). Nil until attached.
 	Genres []*Genre
+	// Hidden mirrors deleted_at IS NOT NULL — only meaningful when the
+	// caller asked List for IncludeHidden (deleted_at IS NULL is the
+	// default WHERE condition otherwise, so Hidden is always false for
+	// every other list). Lets an author's own novel list show a held
+	// novel instead of it silently vanishing with zero explanation.
+	Hidden bool
 }
 
 // NovelListFilter narrows and pages the novels list.
@@ -82,8 +93,14 @@ type NovelListFilter struct {
 	// used by every admin/public list today) means no ownership
 	// filtering at all.
 	OwnerUserID *string
-	Page        int // 1-based
-	PageSize    int
+	// IncludeHidden drops the default "deleted_at IS NULL" condition —
+	// only ever set true by the author-scoped novel list (always paired
+	// with OwnerUserID), so an author sees their own held novels instead
+	// of them silently disappearing. Every other caller (admin, public
+	// catalog) leaves this false and gets the existing behavior.
+	IncludeHidden bool
+	Page          int // 1-based
+	PageSize      int
 }
 
 // NovelWrite is the mutable subset used by Create and Update.
@@ -120,7 +137,7 @@ const novelColumns = `
 	n.average_rating, n.rating_count, n.support_count, n.view_count,
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id AND c.status = 'published'),
 	(SELECT count(*) FROM chapters c WHERE c.novel_id = n.id),
-	n.sort_order, n.created_at, n.updated_at, n.owner_user_id`
+	n.sort_order, n.created_at, n.updated_at, n.owner_user_id, (n.deleted_at IS NOT NULL)`
 
 func scanNovel(row pgx.Row) (*Novel, error) {
 	novel := &Novel{}
@@ -129,14 +146,20 @@ func scanNovel(row pgx.Row) (*Novel, error) {
 		&novel.Status, &novel.IsShort, &novel.IsRecommended, &novel.IsExclusive, &novel.Rating,
 		&novel.AverageRating, &novel.RatingCount, &novel.SupportCount, &novel.ViewCount,
 		&novel.PublishedChapters, &novel.TotalChapters,
-		&novel.SortOrder, &novel.CreatedAt, &novel.UpdatedAt, &novel.OwnerUserID,
+		&novel.SortOrder, &novel.CreatedAt, &novel.UpdatedAt, &novel.OwnerUserID, &novel.Hidden,
 	)
 	return novel, err
 }
 
 // List returns one page of novels plus the total row count for the filter.
 func (repository *NovelRepository) List(ctx context.Context, filter NovelListFilter) ([]*Novel, int, error) {
-	conditions := []string{"n.deleted_at IS NULL"}
+	if filter.IncludeHidden && filter.OwnerUserID == nil {
+		return nil, 0, ErrIncludeHiddenWithoutOwner
+	}
+	conditions := []string{}
+	if !filter.IncludeHidden {
+		conditions = append(conditions, "n.deleted_at IS NULL")
+	}
 	arguments := []any{}
 
 	if filter.Search != "" {
@@ -199,6 +222,9 @@ func (repository *NovelRepository) List(ctx context.Context, filter NovelListFil
 		arguments = append(arguments, filter.GenreID)
 		joinClause = fmt.Sprintf("JOIN novel_genres ng ON ng.novel_id = n.id AND ng.genre_id = $%d", len(arguments))
 	}
+	// conditions is never empty here: either the "deleted_at IS NULL"
+	// default ran, or IncludeHidden did and its guard above requires
+	// OwnerUserID, which already appended its own condition.
 	whereClause := strings.Join(conditions, " AND ")
 
 	var total int

@@ -82,6 +82,11 @@ type novelResponse struct {
 	SortOrder         int             `json:"sort_order"`
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
+	// Hidden is only ever true on the author-scoped list (see
+	// AuthorNovelHandler.List's IncludeHidden) — every other caller never
+	// gets a hidden novel back in the first place, so this is always
+	// false there.
+	Hidden bool `json:"hidden"`
 }
 
 func newNovelResponse(novel *repository.Novel) novelResponse {
@@ -110,6 +115,7 @@ func newNovelResponse(novel *repository.Novel) novelResponse {
 		SortOrder:         novel.SortOrder,
 		CreatedAt:         novel.CreatedAt,
 		UpdatedAt:         novel.UpdatedAt,
+		Hidden:            novel.Hidden,
 	}
 }
 
