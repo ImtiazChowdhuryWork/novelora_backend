@@ -16,11 +16,29 @@ import (
 type AuthorChapterHandler struct {
 	chapterService *service.ChapterService
 	novelService   *service.NovelService
+	reports        *repository.NovelReportRepository
 	auditLogger    *audit.Logger
 }
 
-func NewAuthorChapterHandler(chapterService *service.ChapterService, novelService *service.NovelService, auditLogger *audit.Logger) *AuthorChapterHandler {
-	return &AuthorChapterHandler{chapterService: chapterService, novelService: novelService, auditLogger: auditLogger}
+func NewAuthorChapterHandler(chapterService *service.ChapterService, novelService *service.NovelService, reports *repository.NovelReportRepository, auditLogger *audit.Logger) *AuthorChapterHandler {
+	return &AuthorChapterHandler{chapterService: chapterService, novelService: novelService, reports: reports, auditLogger: auditLogger}
+}
+
+// blockIfHeld stops an author from republishing (immediately or on a
+// schedule) around an admin hold — the only door back to "published"
+// is the release-request flow, which needs an admin's actual approval,
+// not just a submission. Never called from the admin-restore or
+// scheduled-auto-publish paths, which go through ChapterService
+// directly and never touch this handler.
+func (authorChapterHandler *AuthorChapterHandler) blockIfHeld(request *http.Request, chapterID string) error {
+	held, err := authorChapterHandler.reports.HasActiveChapterHold(request.Context(), chapterID)
+	if err != nil {
+		return err
+	}
+	if held {
+		return &service.ValidationError{Message: "this chapter is on hold by admin — request a release review from Notices before publishing"}
+	}
+	return nil
 }
 
 // loadOwnedChapter fetches a chapter and verifies callerUserID owns
@@ -124,6 +142,12 @@ func (authorChapterHandler *AuthorChapterHandler) UpdateStatus(responseWriter ht
 	if !decodeJSON(responseWriter, request, &statusRequest) {
 		return
 	}
+	if statusRequest.Status == "published" {
+		if err := authorChapterHandler.blockIfHeld(request, chapterID); err != nil {
+			writeServiceError(responseWriter, err)
+			return
+		}
+	}
 	chapter, err := authorChapterHandler.chapterService.UpdateStatus(request.Context(), chapterID, statusRequest.Status)
 	if err != nil {
 		writeServiceError(responseWriter, err)
@@ -154,6 +178,10 @@ func (authorChapterHandler *AuthorChapterHandler) Schedule(responseWriter http.R
 	var err error
 	var action string
 	if scheduleRequest.ScheduledAt != nil {
+		if err := authorChapterHandler.blockIfHeld(request, chapterID); err != nil {
+			writeServiceError(responseWriter, err)
+			return
+		}
 		chapter, err = authorChapterHandler.chapterService.Schedule(request.Context(), chapterID, *scheduleRequest.ScheduledAt)
 		action = "chapter.scheduled"
 	} else {

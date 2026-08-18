@@ -123,7 +123,7 @@ func main() {
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService, auditLogger)
 	authorNovelHandler := handler.NewAuthorNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
-	authorChapterHandler := handler.NewAuthorChapterHandler(chapterService, novelService, auditLogger)
+	authorChapterHandler := handler.NewAuthorChapterHandler(chapterService, novelService, novelReportRepository, auditLogger)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService, readingHistoryService, novelReportService, configuration.JWTSecret)
 	novelCommentHandler := handler.NewNovelCommentHandler(novelCommentService, auditLogger, configuration.JWTSecret)
 	novelReportHandler := handler.NewNovelReportHandler(novelReportService, auditLogger, configuration.UploadsDirectory)

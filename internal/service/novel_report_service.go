@@ -416,6 +416,13 @@ func (service *NovelReportService) HoldChapter(
 	if _, err := service.chapterService.UpdateStatus(ctx, *report.ChapterID, "draft"); err != nil {
 		return nil, err
 	}
+	// A pending schedule set before the hold survives a plain draft
+	// transition (SetScheduledAt only clears on publish) — left alone,
+	// the background auto-publish ticker would republish held content
+	// on its own, with no action from the author at all.
+	if _, err := service.chapterService.Unschedule(ctx, *report.ChapterID); err != nil {
+		return nil, err
+	}
 	updated, err := service.reports.UpdateStatus(ctx, reportID, statusChapterOnHold, notes, adminID)
 	if err != nil {
 		return nil, err

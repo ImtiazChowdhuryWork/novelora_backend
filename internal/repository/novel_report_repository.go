@@ -389,6 +389,22 @@ func (repository *NovelReportRepository) HasReported(ctx context.Context, novelI
 	return exists, nil
 }
 
+// HasActiveChapterHold reports whether a chapter is currently under an
+// admin hold the author hasn't cleared — either on hold outright, or
+// awaiting the admin's decision on a submitted release request. Either
+// way it isn't the admin's approval yet, so callers gating "can this
+// author republish this chapter" should treat both as blocking.
+func (repository *NovelReportRepository) HasActiveChapterHold(ctx context.Context, chapterID string) (bool, error) {
+	var exists bool
+	err := repository.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM novel_reports WHERE chapter_id = $1 AND status IN ('chapter_on_hold', 'pending_release_review'))",
+		chapterID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check has active chapter hold: %w", err)
+	}
+	return exists, nil
+}
+
 // ListForUser is the reporter's own report history — the app's "My
 // Reports" Profile page.
 func (repository *NovelReportRepository) ListForUser(ctx context.Context, userID string, page, pageSize int) ([]*NovelReport, int, error) {
