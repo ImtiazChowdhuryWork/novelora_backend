@@ -250,7 +250,7 @@ func (service *NovelReportService) CountPending(ctx context.Context) (int, error
 	return service.reports.CountPending(ctx)
 }
 
-// ListForOwner is the author dashboard's "Notices" page — every report
+// ListForOwner is the author dashboard's Reports page — every report
 // against a novel the caller owns, same pagination/clamp rules as List.
 func (service *NovelReportService) ListForOwner(ctx context.Context, ownerUserID, status string, page, pageSize int) ([]*repository.NovelReport, int, error) {
 	if page < 1 {
@@ -340,6 +340,19 @@ func (service *NovelReportService) AdminDelete(ctx context.Context, reportID str
 	return service.reports.SoftDelete(ctx, reportID)
 }
 
+// AdminBulkDelete clears out an entire terminal status at once — the
+// admin's "declutter old resolved/rejected reports" action, rather
+// than deleting a backlog one row at a time. Restricted to resolved/
+// rejected: anything else either still needs attention (submitted/
+// under_review) or is actively holding content (blocked the same way
+// AdminDelete blocks a single one).
+func (service *NovelReportService) AdminBulkDelete(ctx context.Context, status string) (int, error) {
+	if status != statusResolved && status != statusRejected {
+		return 0, &ValidationError{Message: "bulk delete only supports resolved or rejected reports"}
+	}
+	return service.reports.BulkSoftDeleteByStatus(ctx, status)
+}
+
 // PurgeOldDeleted hard-deletes reports soft-deleted more than 30 days
 // ago — see runReportPurgeTicker in main.go.
 func (service *NovelReportService) PurgeOldDeleted(ctx context.Context) (int, error) {
@@ -347,8 +360,9 @@ func (service *NovelReportService) PurgeOldDeleted(ctx context.Context) (int, er
 }
 
 // ReleaseRequests is a report's full release-request history — the
-// admin drawer's "pending review" card and the author's Notices page
-// (to show a previous rejection's admin_comment) both read this.
+// admin drawer's "pending review" card and the author dashboard's
+// Reports page (to show a previous rejection's admin_comment) both
+// read this.
 func (service *NovelReportService) ReleaseRequests(ctx context.Context, reportID string) ([]*repository.ReleaseRequest, error) {
 	requests, err := service.releaseRequests.ListForReport(ctx, reportID)
 	if err != nil {
@@ -365,7 +379,7 @@ func (service *NovelReportService) ReleaseRequests(ctx context.Context, reportID
 
 // ReleaseRequestsForOwner is the author's own report's release-request
 // history — same non-leaking ownership shape as SubmitReleaseRequest,
-// so the author's Notices page can show a previous rejection's
+// so the author's Reports page can show a previous rejection's
 // admin_comment before they try again.
 func (service *NovelReportService) ReleaseRequestsForOwner(ctx context.Context, reportID, callerUserID string) ([]*repository.ReleaseRequest, error) {
 	report, err := service.reports.GetByID(ctx, reportID)

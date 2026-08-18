@@ -285,6 +285,7 @@ func main() {
 	mux.Handle("GET /api/v1/admin/reports/{id}/release-requests", requireAdmin(novelReportHandler.ReleaseRequestsAdmin))
 	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/approve", requireAdmin(novelReportHandler.ApproveRelease))
 	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/reject", requireAdmin(novelReportHandler.RejectRelease))
+	mux.Handle("DELETE /api/v1/admin/reports/bulk", requireAdmin(novelReportHandler.AdminBulkDelete))
 	mux.Handle("DELETE /api/v1/admin/reports/{id}", requireAdmin(novelReportHandler.AdminDelete))
 
 	// Admin: author moderation (report detail view's author panel — see

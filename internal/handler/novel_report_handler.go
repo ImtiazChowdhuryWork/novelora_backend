@@ -408,6 +408,22 @@ func (handler *NovelReportHandler) AdminDelete(responseWriter http.ResponseWrite
 	responseWriter.WriteHeader(http.StatusNoContent)
 }
 
+// AdminBulkDelete: DELETE /admin/reports/bulk?status=resolved|rejected
+// — clears an entire terminal status at once, so decluttering an old
+// backlog doesn't mean deleting one row at a time.
+func (handler *NovelReportHandler) AdminBulkDelete(responseWriter http.ResponseWriter, request *http.Request) {
+	status := request.URL.Query().Get("status")
+	deletedCount, err := handler.reports.AdminBulkDelete(request.Context(), status)
+	if err != nil {
+		writeServiceError(responseWriter, err)
+		return
+	}
+	actorID, actorName := actorFromContext(request.Context())
+	handler.auditLogger.Log(actorID, actorName, "report.bulk_deleted", "report", "",
+		map[string]any{"status": status, "deleted_count": deletedCount})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"deleted_count": deletedCount})
+}
+
 // ReleaseRequestsAdmin: GET /admin/reports/{id}/release-requests
 func (handler *NovelReportHandler) ReleaseRequestsAdmin(responseWriter http.ResponseWriter, request *http.Request) {
 	requests, err := handler.reports.ReleaseRequests(request.Context(), request.PathValue("id"))
@@ -445,7 +461,7 @@ func (handler *NovelReportHandler) Mine(responseWriter http.ResponseWriter, requ
 }
 
 // ListForOwner: GET /author/reports?status=&page=&page_size= — the
-// author dashboard's "Notices" page. Requires the RequireAuthor
+// author dashboard's Reports page. Requires the RequireAuthor
 // middleware.
 func (handler *NovelReportHandler) ListForOwner(responseWriter http.ResponseWriter, request *http.Request) {
 	ownerUserID, _ := request.Context().Value(middleware.UserIDContextKey).(string)

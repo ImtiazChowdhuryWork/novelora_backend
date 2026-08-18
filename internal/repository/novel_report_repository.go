@@ -292,7 +292,7 @@ func (repository *NovelReportRepository) SetShareReporterEvidence(ctx context.Co
 	return nil
 }
 
-// ListForOwner is the author-facing "Notices" list — every report
+// ListForOwner is the author-facing Reports list — every report
 // against a novel owned by ownerUserID, optionally filtered to one
 // status ("" = all).
 func (repository *NovelReportRepository) ListForOwner(ctx context.Context, ownerUserID, status string, page, pageSize int) ([]*NovelReport, int, error) {
@@ -353,7 +353,7 @@ func (repository *NovelReportRepository) ListForAuthorName(ctx context.Context, 
 
 // ListForOwnerAll is ListForAuthorName's real-account counterpart —
 // distinct from ListForOwner, which is the paginated author-dashboard
-// "Notices" list.
+// Reports list.
 func (repository *NovelReportRepository) ListForOwnerAll(ctx context.Context, ownerUserID string) ([]*NovelReport, error) {
 	rows, err := repository.pool.Query(ctx,
 		"SELECT "+reportColumns+" FROM "+reportFromClause+" WHERE n.owner_user_id = $1 ORDER BY r.created_at DESC",
@@ -405,6 +405,19 @@ func (repository *NovelReportRepository) SoftDelete(ctx context.Context, reportI
 		return ErrReportNotFound
 	}
 	return nil
+}
+
+// BulkSoftDeleteByStatus soft-deletes every report currently in the
+// given status — the admin's "clear out old resolved/rejected clutter"
+// action. The caller (service) restricts status to terminal values
+// only; this method itself trusts what it's given.
+func (repository *NovelReportRepository) BulkSoftDeleteByStatus(ctx context.Context, status string) (int, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET deleted_at = now() WHERE deleted_at IS NULL AND status = $1", status)
+	if err != nil {
+		return 0, fmt.Errorf("bulk soft delete reports: %w", err)
+	}
+	return int(commandTag.RowsAffected()), nil
 }
 
 // PurgeDeletedBefore permanently removes any report soft-deleted before

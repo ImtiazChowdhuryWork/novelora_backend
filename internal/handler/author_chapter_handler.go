@@ -36,7 +36,7 @@ func (authorChapterHandler *AuthorChapterHandler) blockIfHeld(request *http.Requ
 		return err
 	}
 	if held {
-		return &service.ValidationError{Message: "this chapter is on hold by admin — request a release review from Notices before publishing"}
+		return &service.ValidationError{Message: "this chapter is on hold by admin — request a release review from Reports before publishing"}
 	}
 	return nil
 }

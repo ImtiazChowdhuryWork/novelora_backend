@@ -116,7 +116,7 @@ func (repository *ReleaseRequestRepository) ListImages(ctx context.Context, requ
 
 // ListForReport is the report's release-request history, newest first
 // — both the admin drawer's "pending review" card and the author's
-// Notices page (to show a previous rejection's admin_comment) read
+// Reports page (to show a previous rejection's admin_comment) read
 // this the same way.
 func (repository *ReleaseRequestRepository) ListForReport(ctx context.Context, reportID string) ([]*ReleaseRequest, error) {
 	rows, err := repository.pool.Query(ctx,
