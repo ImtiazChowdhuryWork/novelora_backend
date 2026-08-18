@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
@@ -339,13 +340,32 @@ func main() {
 
 	server := &http.Server{
 		Addr:    ":" + configuration.Port,
-		Handler: middleware.RequestLogger(globalRateLimiter.Middleware(mux)),
+		Handler: middleware.RequestLogger(rateLimitExcept(globalRateLimiter, "/uploads/", mux)),
 	}
 
 	log.Printf("novelora_backend listening on :%s", configuration.Port)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// rateLimitExcept applies limiter to every request except those whose
+// path starts with skipPrefix. Static asset serving (cover images,
+// evidence screenshots) is cheap, read-only, and a single content-heavy
+// screen legitimately fires dozens of these in parallel — counting them
+// against the same per-IP budget as real API calls made normal browsing
+// trip the limiter (a book grid alone was seen sending ~100 cover
+// requests in 6 seconds). The IPRateLimiter itself stays generic; this
+// route-specific exemption lives here with the rest of the route wiring.
+func rateLimitExcept(limiter *middleware.IPRateLimiter, skipPrefix string, next http.Handler) http.Handler {
+	limited := limiter.Middleware(next)
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, skipPrefix) {
+			next.ServeHTTP(responseWriter, request)
+			return
+		}
+		limited.ServeHTTP(responseWriter, request)
+	})
 }
 
 // runScheduledPublishTicker checks every minute for draft chapters
