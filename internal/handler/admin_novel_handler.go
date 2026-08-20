@@ -87,6 +87,11 @@ type novelResponse struct {
 	// gets a hidden novel back in the first place, so this is always
 	// false there.
 	Hidden bool `json:"hidden"`
+	// CommentCount is only ever populated by AuthorModerationHandler.
+	// OtherNovels (the report detail drawer's Published tab) — every
+	// other caller leaves it at its zero value, since no other list
+	// screen shows it.
+	CommentCount int `json:"comment_count"`
 }
 
 func newNovelResponse(novel *repository.Novel) novelResponse {

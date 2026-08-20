@@ -47,19 +47,21 @@ func NewNovelReportHandler(reports *service.NovelReportService, auditLogger *aud
 }
 
 type reportResponse struct {
-	ID          string  `json:"id"`
-	NovelID     string  `json:"novel_id"`
-	NovelTitle  string  `json:"novel_title"`
-	AuthorName  string  `json:"author_name"`
-	OwnerUserID *string `json:"owner_user_id"`
-	UserID      string  `json:"user_id"`
-	Username    string  `json:"username"`
-	Reason      string  `json:"reason"`
-	Details     string  `json:"details"`
-	ChapterID   *string `json:"chapter_id"`
-	ChapterTitle *string `json:"chapter_title"`
-	ImageCount   int     `json:"image_count"`
-	Images       []string `json:"images"`
+	ID                    string   `json:"id"`
+	NovelID               string   `json:"novel_id"`
+	NovelTitle            string   `json:"novel_title"`
+	AuthorName            string   `json:"author_name"`
+	OwnerUserID           *string  `json:"owner_user_id"`
+	UserID                string   `json:"user_id"`
+	Username              string   `json:"username"`
+	Reason                string   `json:"reason"`
+	ReasonType            string   `json:"reason_type"`
+	ReasonTypeDescription string   `json:"reason_type_description"`
+	Details               string   `json:"details"`
+	ChapterID             *string  `json:"chapter_id"`
+	ChapterTitle          *string  `json:"chapter_title"`
+	ImageCount            int      `json:"image_count"`
+	Images                []string `json:"images"`
 	// AdminEvidenceImages is the admin's own proof attached to the
 	// report's most recent hold — see NovelReport.AdminEvidenceImages.
 	// Unlike Images (the reporter's evidence, gated by
@@ -87,40 +89,46 @@ func newReportResponse(report *repository.NovelReport) reportResponse {
 		adminEvidenceImages = []string{}
 	}
 	return reportResponse{
-		ID:                  report.ID,
-		NovelID:             report.NovelID,
-		NovelTitle:          report.NovelTitle,
-		AuthorName:          report.AuthorName,
-		OwnerUserID:         report.OwnerUserID,
-		UserID:              report.UserID,
-		Username:            report.Username,
-		Reason:              report.Reason,
-		Details:             report.Details,
-		ChapterID:           report.ChapterID,
-		ChapterTitle:        report.ChapterTitle,
-		ImageCount:          report.ImageCount,
-		Images:              imageURLs,
-		AdminEvidenceImages: adminEvidenceImages,
-		Status:              report.Status,
-		ResolutionNote:      report.ResolutionNote,
-		AuthorResponse:      report.AuthorResponse,
-		ReviewedByName:      report.ReviewedByName,
-		ReviewedAt:          report.ReviewedAt,
-		CreatedAt:           report.CreatedAt,
-		ChapterStatus:       report.ChapterStatus,
-		NovelHidden:         report.NovelHidden,
-		CoverURL:            report.CoverURL,
+		ID:                    report.ID,
+		NovelID:               report.NovelID,
+		NovelTitle:            report.NovelTitle,
+		AuthorName:            report.AuthorName,
+		OwnerUserID:           report.OwnerUserID,
+		UserID:                report.UserID,
+		Username:              report.Username,
+		Reason:                report.Reason,
+		ReasonType:            report.ReasonType,
+		ReasonTypeDescription: report.ReasonTypeDescription,
+		Details:               report.Details,
+		ChapterID:             report.ChapterID,
+		ChapterTitle:          report.ChapterTitle,
+		ImageCount:            report.ImageCount,
+		Images:                imageURLs,
+		AdminEvidenceImages:   adminEvidenceImages,
+		Status:                report.Status,
+		ResolutionNote:        report.ResolutionNote,
+		AuthorResponse:        report.AuthorResponse,
+		ReviewedByName:        report.ReviewedByName,
+		ReviewedAt:            report.ReviewedAt,
+		CreatedAt:             report.CreatedAt,
+		ChapterStatus:         report.ChapterStatus,
+		NovelHidden:           report.NovelHidden,
+		CoverURL:              report.CoverURL,
 	}
 }
 
 type moderationActionResponse struct {
 	ID         string    `json:"id"`
-	ReportID   string    `json:"report_id"`
-	ActionType string    `json:"action_type"`
-	AdminName  string    `json:"admin_name"`
-	Notes      string    `json:"notes"`
-	CreatedAt  time.Time `json:"created_at"`
-	Images     []string  `json:"images"`
+	ReportID       string    `json:"report_id"`
+	ActionType     string    `json:"action_type"`
+	AdminName      string    `json:"admin_name"`
+	Notes          string    `json:"notes"`
+	CreatedAt      time.Time `json:"created_at"`
+	Images         []string  `json:"images"`
+	// ReporterImages is only ever non-empty on a hold_chapter/
+	// hold_novel entry, and only when the report's
+	// ShareReporterEvidence is set — see ModerationAction.ReporterImages.
+	ReporterImages []string `json:"reporter_images"`
 }
 
 func newModerationActionResponse(action *repository.ModerationAction) moderationActionResponse {
@@ -128,14 +136,19 @@ func newModerationActionResponse(action *repository.ModerationAction) moderation
 	if images == nil {
 		images = []string{}
 	}
+	reporterImages := action.ReporterImages
+	if reporterImages == nil {
+		reporterImages = []string{}
+	}
 	return moderationActionResponse{
-		ID:         action.ID,
-		ReportID:   action.ReportID,
-		ActionType: action.ActionType,
-		AdminName:  action.AdminName,
-		Notes:      action.Notes,
-		CreatedAt:  action.CreatedAt,
-		Images:     images,
+		ID:             action.ID,
+		ReportID:       action.ReportID,
+		ActionType:     action.ActionType,
+		AdminName:      action.AdminName,
+		Notes:          action.Notes,
+		CreatedAt:      action.CreatedAt,
+		Images:         images,
+		ReporterImages: reporterImages,
 	}
 }
 
@@ -143,11 +156,12 @@ func newModerationActionResponse(action *repository.ModerationAction) moderation
 // AdminName — the author's own timeline (see ModerationActionsForOwner)
 // shows what happened and when, not which staff account did it.
 type authorModerationActionResponse struct {
-	ID         string    `json:"id"`
-	ActionType string    `json:"action_type"`
-	Notes      string    `json:"notes"`
-	CreatedAt  time.Time `json:"created_at"`
-	Images     []string  `json:"images"`
+	ID             string    `json:"id"`
+	ActionType     string    `json:"action_type"`
+	Notes          string    `json:"notes"`
+	CreatedAt      time.Time `json:"created_at"`
+	Images         []string  `json:"images"`
+	ReporterImages []string  `json:"reporter_images"`
 }
 
 func newAuthorModerationActionResponse(action *repository.ModerationAction) authorModerationActionResponse {
@@ -155,12 +169,17 @@ func newAuthorModerationActionResponse(action *repository.ModerationAction) auth
 	if images == nil {
 		images = []string{}
 	}
+	reporterImages := action.ReporterImages
+	if reporterImages == nil {
+		reporterImages = []string{}
+	}
 	return authorModerationActionResponse{
-		ID:         action.ID,
-		ActionType: action.ActionType,
-		Notes:      action.Notes,
-		CreatedAt:  action.CreatedAt,
-		Images:     images,
+		ID:             action.ID,
+		ActionType:     action.ActionType,
+		Notes:          action.Notes,
+		CreatedAt:      action.CreatedAt,
+		Images:         images,
+		ReporterImages: reporterImages,
 	}
 }
 

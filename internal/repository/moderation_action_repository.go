@@ -25,7 +25,18 @@ type ModerationAction struct {
 	// shape as NovelReport.Images/AdminEvidenceImages — populated by
 	// NovelReportService.ModerationActions via ListImages, one query
 	// per action (small N, same tradeoff ReleaseRequests already makes).
+	// This is the admin's own evidence attached to this action.
 	Images []string
+	// ReporterImages is the *reporter's* original evidence, surfaced
+	// on this same history entry when it's the hold_chapter/hold_novel
+	// step and the report's ShareReporterEvidence is set — so the
+	// history reads as a complete record of that decision on its own,
+	// not split across this timeline and the report's own evidence
+	// section. Kept separate from Images (never merged) so the caller
+	// can still label whose evidence is whose. Empty for every other
+	// action type, and for a hold the admin chose not to share
+	// reporter evidence on.
+	ReporterImages []string
 }
 
 type ModerationActionRepository struct {

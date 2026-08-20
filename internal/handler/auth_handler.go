@@ -201,7 +201,11 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 	case errors.Is(err, repository.ErrEmailTaken),
 		errors.Is(err, repository.ErrUsernameTaken),
 		errors.Is(err, repository.ErrGenreNameTaken),
-		errors.Is(err, repository.ErrAuthorProfileExists):
+		errors.Is(err, repository.ErrAuthorProfileExists),
+		errors.Is(err, repository.ErrReportReasonLabelTaken),
+		errors.Is(err, repository.ErrLastReportReason),
+		errors.Is(err, repository.ErrReportReasonTypeLabelTaken),
+		errors.Is(err, repository.ErrReportReasonTypeInUse):
 		writeError(responseWriter, http.StatusConflict, err.Error())
 	case errors.Is(err, repository.ErrNovelNotFound),
 		errors.Is(err, repository.ErrChapterNotFound),
@@ -209,7 +213,9 @@ func writeServiceError(responseWriter http.ResponseWriter, err error) {
 		errors.Is(err, repository.ErrGenreNotFound),
 		errors.Is(err, repository.ErrDiscoverSectionNotFound),
 		errors.Is(err, repository.ErrCommentNotFound),
-		errors.Is(err, repository.ErrReportNotFound):
+		errors.Is(err, repository.ErrReportNotFound),
+		errors.Is(err, repository.ErrReportReasonNotFound),
+		errors.Is(err, repository.ErrReportReasonTypeNotFound):
 		writeError(responseWriter, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials),
 		errors.Is(err, service.ErrInvalidRefreshToken),

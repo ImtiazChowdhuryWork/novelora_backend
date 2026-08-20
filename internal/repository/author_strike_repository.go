@@ -20,6 +20,10 @@ type AuthorStrike struct {
 	AuthorName    string
 	OwnerUserID   *string
 	Note          string
+	// Severity is one of 'minor', 'moderate', 'severe' (migration
+	// 0042) — feeds the Profile tab's computed risk level instead of
+	// every strike counting the same regardless of what it was for.
+	Severity      string
 	CreatedBy     *string
 	CreatedByName string
 	CreatedAt     time.Time
@@ -34,26 +38,28 @@ func NewAuthorStrikeRepository(pool *pgxpool.Pool) *AuthorStrikeRepository {
 }
 
 const strikeColumns = `
-	s.id, s.author_name, s.owner_user_id, s.note, s.created_by, coalesce(u.username, ''), s.created_at`
+	s.id, s.author_name, s.owner_user_id, s.note, s.severity, s.created_by, coalesce(u.username, ''), s.created_at`
 
 const strikeFromClause = `author_strikes s LEFT JOIN users u ON u.id = s.created_by`
 
 func scanStrike(row pgx.Row) (*AuthorStrike, error) {
 	strike := &AuthorStrike{}
-	err := row.Scan(&strike.ID, &strike.AuthorName, &strike.OwnerUserID, &strike.Note,
+	err := row.Scan(&strike.ID, &strike.AuthorName, &strike.OwnerUserID, &strike.Note, &strike.Severity,
 		&strike.CreatedBy, &strike.CreatedByName, &strike.CreatedAt)
 	return strike, err
 }
 
 // Create records a strike against an author name and, when the
 // reported novel has a real account (ownerUserID non-nil), stamps
-// that too — see migration 0032.
-func (repository *AuthorStrikeRepository) Create(ctx context.Context, authorName string, ownerUserID *string, note, createdBy string) (*AuthorStrike, error) {
+// that too — see migration 0032. severity is one of 'minor',
+// 'moderate', 'severe' — validated by the caller (service layer),
+// enforced again by the DB check constraint (migration 0042).
+func (repository *AuthorStrikeRepository) Create(ctx context.Context, authorName string, ownerUserID *string, note, severity, createdBy string) (*AuthorStrike, error) {
 	var strikeID string
 	err := repository.pool.QueryRow(ctx, `
-		INSERT INTO author_strikes (author_name, owner_user_id, note, created_by)
-		VALUES ($1, $2, $3, $4) RETURNING id`,
-		authorName, ownerUserID, note, createdBy,
+		INSERT INTO author_strikes (author_name, owner_user_id, note, severity, created_by)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		authorName, ownerUserID, note, severity, createdBy,
 	).Scan(&strikeID)
 	if err != nil {
 		return nil, fmt.Errorf("create author strike: %w", err)

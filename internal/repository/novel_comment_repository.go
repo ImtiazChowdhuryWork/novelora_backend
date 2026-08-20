@@ -168,6 +168,39 @@ func (repository *NovelCommentRepository) ListTopLevelForNovel(ctx context.Conte
 	return comments, total, rows.Err()
 }
 
+// CountForNovels batches the top-level comment count across a page of
+// novels (same "deleted ones still count" semantics as
+// ListTopLevelForNovel's own total) — avoids an N+1 query when a list
+// screen shows each novel's comment count. A novel with zero comments
+// is simply absent from the returned map; callers should treat a
+// missing key as 0.
+func (repository *NovelCommentRepository) CountForNovels(ctx context.Context, novelIDs []string) (map[string]int, error) {
+	counts := map[string]int{}
+	if len(novelIDs) == 0 {
+		return counts, nil
+	}
+
+	rows, err := repository.pool.Query(ctx, `
+		SELECT novel_id, count(*)
+		FROM novel_comments
+		WHERE novel_id = ANY($1) AND parent_comment_id IS NULL
+		GROUP BY novel_id`, novelIDs)
+	if err != nil {
+		return nil, fmt.Errorf("count comments for novels: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var novelID string
+		var count int
+		if err := rows.Scan(&novelID, &count); err != nil {
+			return nil, fmt.Errorf("scan comment count: %w", err)
+		}
+		counts[novelID] = count
+	}
+	return counts, rows.Err()
+}
+
 // ListRepliesForParents batches every reply under the given top-level
 // comment ids (an already-loaded page), oldest first within each
 // parent — one round trip for a whole page instead of one per comment.

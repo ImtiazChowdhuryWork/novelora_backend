@@ -21,18 +21,6 @@ const maxReportDetailsLength = 2000
 // the same cap for release-request proof images.
 const maxReportImages = 3
 
-// allowedReportReasons is the fixed, reader-facing set the app's
-// report sheet presents — validated here (not a DB CHECK) so the set
-// can change without a migration, same choice as comment body length.
-var allowedReportReasons = map[string]bool{
-	"spam":          true,
-	"plagiarism":    true,
-	"inappropriate": true,
-	"harassment":    true,
-	"broken":        true,
-	"other":         true,
-}
-
 // The moderation state machine's full status vocabulary. Every
 // transition is its own method below (MarkUnderReview is private,
 // called automatically from GetDetail) rather than one generic setter
@@ -70,6 +58,7 @@ const (
 // coordinated call sites.
 type NovelReportService struct {
 	reports           *repository.NovelReportRepository
+	reasons           *repository.ReportReasonRepository
 	novels            *repository.NovelRepository
 	chapters          *repository.ChapterRepository
 	moderationActions *repository.ModerationActionRepository
@@ -84,6 +73,7 @@ type NovelReportService struct {
 
 func NewNovelReportService(
 	reports *repository.NovelReportRepository,
+	reasons *repository.ReportReasonRepository,
 	novels *repository.NovelRepository,
 	chapters *repository.ChapterRepository,
 	moderationActions *repository.ModerationActionRepository,
@@ -97,6 +87,7 @@ func NewNovelReportService(
 ) *NovelReportService {
 	return &NovelReportService{
 		reports:           reports,
+		reasons:           reasons,
 		novels:            novels,
 		chapters:          chapters,
 		moderationActions: moderationActions,
@@ -112,21 +103,25 @@ func NewNovelReportService(
 
 // Create validates and stores a reader's report, then attaches any
 // evidence screenshots (already saved to disk by the handler — this
-// just records their URLs). "other" requires non-empty details (the
-// only free-text reason); every other reason is self-explanatory as a
-// category and doesn't need one. chapterID is optional — nil means
-// the report is about the whole novel; when given, it must actually
-// belong to novelID. Confirms receipt to the reporter immediately —
-// "Report submitted" — the first of the spec's reporter notifications.
+// just records their URLs). reason must match a currently-configured
+// ReportReason's label exactly (admin-managed, see
+// ReportReasonRepository); that row's RequiresDetails flag decides
+// whether details must be non-empty — generalizes what used to be a
+// hardcoded reason == "other" check. chapterID is optional — nil
+// means the report is about the whole novel; when given, it must
+// actually belong to novelID. Confirms receipt to the reporter
+// immediately — "Report submitted" — the first of the spec's
+// reporter notifications.
 func (service *NovelReportService) Create(
 	ctx context.Context, novelID, userID, reason, details string, chapterID *string, imageURLs []string,
 ) (*repository.NovelReport, error) {
 	reason = strings.TrimSpace(reason)
 	details = strings.TrimSpace(details)
-	if !allowedReportReasons[reason] {
+	reasonRow, err := service.reasons.GetByLabel(ctx, reason)
+	if err != nil {
 		return nil, &ValidationError{Message: "invalid report reason"}
 	}
-	if reason == "other" && details == "" {
+	if reasonRow.RequiresDetails && details == "" {
 		return nil, &ValidationError{Message: "please describe the issue"}
 	}
 	if len(details) > maxReportDetailsLength {
@@ -148,7 +143,8 @@ func (service *NovelReportService) Create(
 		}
 	}
 
-	report, err := service.reports.Create(ctx, novelID, userID, reason, details, chapterID)
+	report, err := service.reports.Create(
+		ctx, novelID, userID, reason, reasonRow.TypeLabel, reasonRow.TypeDescription, details, chapterID)
 	if err != nil {
 		return nil, err
 	}
@@ -304,17 +300,45 @@ func (service *NovelReportService) Delete(ctx context.Context, reportID, userID 
 // ModerationActions is the drawer's History timeline — each action's
 // own attached evidence (if any) comes along too, so an approve/reject
 // decision's proof shows inline at the step it was attached, not just
-// a hold's.
+// a hold's. A hold_chapter/hold_novel entry also carries the
+// reporter's own evidence (ReporterImages) when the report's
+// ShareReporterEvidence is set, so that one entry is a complete record
+// of the decision — both what the reporter submitted and what the
+// admin attached — instead of the reporter's half only ever showing
+// in the report's separate evidence section.
 func (service *NovelReportService) ModerationActions(ctx context.Context, reportID string) ([]*repository.ModerationAction, error) {
 	actions, err := service.moderationActions.ListForReport(ctx, reportID)
 	if err != nil {
 		return nil, err
 	}
+	var reporterImages []string
+	var reporterImagesLoaded bool
 	for _, action := range actions {
 		action.Images, err = service.moderationActions.ListImages(ctx, action.ID)
 		if err != nil {
 			return nil, err
 		}
+		if action.ActionType != actionHoldChapter && action.ActionType != actionHoldNovel {
+			continue
+		}
+		if !reporterImagesLoaded {
+			report, err := service.reports.GetByID(ctx, reportID)
+			if err != nil {
+				return nil, err
+			}
+			if report.ShareReporterEvidence {
+				reporterEvidence, err := service.reports.ListImages(ctx, reportID)
+				if err != nil {
+					return nil, err
+				}
+				reporterImages = make([]string, 0, len(reporterEvidence))
+				for _, image := range reporterEvidence {
+					reporterImages = append(reporterImages, image.ImageURL)
+				}
+			}
+			reporterImagesLoaded = true
+		}
+		action.ReporterImages = reporterImages
 	}
 	return actions, nil
 }

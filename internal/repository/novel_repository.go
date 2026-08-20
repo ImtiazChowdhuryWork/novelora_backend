@@ -509,31 +509,6 @@ func (repository *NovelRepository) ListByAuthorName(ctx context.Context, authorN
 	return novels, rows.Err()
 }
 
-// BulkHideByAuthorName soft-deletes every non-deleted novel by an
-// exact author-name match in one action — the admin "take action
-// against the author" bulk-hide button. Returns the ids that were
-// hidden, so the caller can publish a realtime "novel.deleted" event
-// per novel the same way a single-novel delete does.
-func (repository *NovelRepository) BulkHideByAuthorName(ctx context.Context, authorName string) ([]string, error) {
-	rows, err := repository.pool.Query(ctx,
-		"UPDATE novels SET deleted_at = now() WHERE author_name = $1 AND deleted_at IS NULL RETURNING id",
-		authorName)
-	if err != nil {
-		return nil, fmt.Errorf("bulk hide novels by author: %w", err)
-	}
-	defer rows.Close()
-
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan bulk-hidden novel id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
 // ListByOwnerUserID is ListByAuthorName's real-account counterpart —
 // used instead of it when the report being reviewed points at a novel
 // with a real owner_user_id (see migration 0030), rather than an
@@ -559,26 +534,4 @@ func (repository *NovelRepository) ListByOwnerUserID(ctx context.Context, ownerU
 		novels = append(novels, novel)
 	}
 	return novels, rows.Err()
-}
-
-// BulkHideByOwnerUserID is BulkHideByAuthorName's real-account
-// counterpart — same shape, same caller.
-func (repository *NovelRepository) BulkHideByOwnerUserID(ctx context.Context, ownerUserID string) ([]string, error) {
-	rows, err := repository.pool.Query(ctx,
-		"UPDATE novels SET deleted_at = now() WHERE owner_user_id = $1 AND deleted_at IS NULL RETURNING id",
-		ownerUserID)
-	if err != nil {
-		return nil, fmt.Errorf("bulk hide novels by owner: %w", err)
-	}
-	defer rows.Close()
-
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan bulk-hidden novel id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }

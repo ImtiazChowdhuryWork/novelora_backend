@@ -32,7 +32,13 @@ type NovelReport struct {
 	UserID         string
 	Username       string
 	Reason         string
-	Details        string
+	// ReasonType/ReasonTypeDescription snapshot Reason's parent
+	// ReportReasonType label/description at submit time — see
+	// migration 0041's comment. Powers the author dashboard's report
+	// type pill + its "i" info-tap.
+	ReasonType            string
+	ReasonTypeDescription string
+	Details               string
 	ChapterID      *string
 	ChapterTitle   *string
 	Status         string
@@ -103,7 +109,7 @@ func NewNovelReportRepository(pool *pgxpool.Pool) *NovelReportRepository {
 
 const reportColumns = `
 	r.id, r.novel_id, n.title, n.author_name, n.owner_user_id, r.user_id, u.username,
-	r.reason, r.details, r.chapter_id, c.title,
+	r.reason, r.reason_type, r.reason_type_description, r.details, r.chapter_id, c.title,
 	r.status, r.resolution_note, r.author_response, r.reviewed_by, coalesce(reviewer.username, ''),
 	r.reviewed_at, r.created_at,
 	(SELECT count(*) FROM novel_report_images ri WHERE ri.report_id = r.id),
@@ -113,7 +119,7 @@ func scanReport(row pgx.Row) (*NovelReport, error) {
 	report := &NovelReport{}
 	err := row.Scan(
 		&report.ID, &report.NovelID, &report.NovelTitle, &report.AuthorName, &report.OwnerUserID, &report.UserID, &report.Username,
-		&report.Reason, &report.Details, &report.ChapterID, &report.ChapterTitle,
+		&report.Reason, &report.ReasonType, &report.ReasonTypeDescription, &report.Details, &report.ChapterID, &report.ChapterTitle,
 		&report.Status, &report.ResolutionNote, &report.AuthorResponse, &report.ReviewedBy, &report.ReviewedByName,
 		&report.ReviewedAt, &report.CreatedAt, &report.ImageCount,
 		&report.ChapterStatus, &report.NovelHidden, &report.ShareReporterEvidence, &report.CoverURL,
@@ -129,14 +135,19 @@ const reportFromClause = `
 	LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by`
 
 // Create stores a report, optionally naming the specific chapter it's
-// about (nil = the whole novel). Evidence images are added separately
-// via AddImages, once the report row (and its id) exist.
-func (repository *NovelReportRepository) Create(ctx context.Context, novelID, userID, reason, details string, chapterID *string) (*NovelReport, error) {
+// about (nil = the whole novel). reasonType/reasonTypeDescription are
+// the reason's parent type, snapshotted by the caller (see
+// NovelReportService.Create) — see migration 0041's comment. Evidence
+// images are added separately via AddImages, once the report row
+// (and its id) exist.
+func (repository *NovelReportRepository) Create(
+	ctx context.Context, novelID, userID, reason, reasonType, reasonTypeDescription, details string, chapterID *string,
+) (*NovelReport, error) {
 	var reportID string
 	err := repository.pool.QueryRow(ctx, `
-		INSERT INTO novel_reports (novel_id, user_id, reason, details, chapter_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		novelID, userID, reason, details, chapterID,
+		INSERT INTO novel_reports (novel_id, user_id, reason, reason_type, reason_type_description, details, chapter_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		novelID, userID, reason, reasonType, reasonTypeDescription, details, chapterID,
 	).Scan(&reportID)
 	if err != nil {
 		return nil, fmt.Errorf("create report: %w", err)
