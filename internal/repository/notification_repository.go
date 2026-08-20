@@ -90,6 +90,21 @@ func (repository *NotificationRepository) CreateForUser(ctx context.Context, use
 	return nil
 }
 
+// CreateForUserGeneral is CreateForUser without a novel behind it — for
+// single-account events with nothing to navigate to, e.g. a strike
+// notice (AuthorModerationService.AddStrike). Mirrors
+// CreateBroadcastForAllUsers's no-novel shape, just targeted at one user.
+func (repository *NotificationRepository) CreateForUserGeneral(ctx context.Context, userID, title, body string) error {
+	_, err := repository.pool.Exec(ctx, `
+		INSERT INTO notifications (user_id, title, body)
+		VALUES ($1, $2, $3)`,
+		userID, title, body)
+	if err != nil {
+		return fmt.Errorf("create general user notification: %w", err)
+	}
+	return nil
+}
+
 // ListForUser returns the newest-first page for a user alongside the
 // total row count, for pagination.
 func (repository *NotificationRepository) ListForUser(ctx context.Context, userID string, page, pageSize int) ([]*Notification, int, error) {

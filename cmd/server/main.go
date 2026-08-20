@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ImtiazChowdhuryWork/novelora_backend/internal/audit"
@@ -67,6 +68,10 @@ func main() {
 	novelCommentRepository := repository.NewNovelCommentRepository(pool)
 	novelSupportRepository := repository.NewNovelSupportRepository(pool)
 	novelReportRepository := repository.NewNovelReportRepository(pool)
+	reportReasonRepository := repository.NewReportReasonRepository(pool)
+	reportReasonTypeRepository := repository.NewReportReasonTypeRepository(pool)
+	moderationActionRepository := repository.NewModerationActionRepository(pool)
+	releaseRequestRepository := repository.NewReleaseRequestRepository(pool)
 	authorStrikeRepository := repository.NewAuthorStrikeRepository(pool)
 	auditLogRepository := repository.NewAuditLogRepository(pool)
 	auditLogger := audit.NewLogger(auditLogRepository)
@@ -103,9 +108,13 @@ func main() {
 	readingHistoryService := service.NewReadingHistoryService(readingHistoryRepository, novelRepository, genreRepository)
 	novelCommentService := service.NewNovelCommentService(novelCommentRepository, novelRepository, eventHub)
 	novelReportService := service.NewNovelReportService(
-		novelReportRepository, novelRepository, chapterRepository,
+		novelReportRepository, reportReasonRepository, novelRepository, chapterRepository,
+		moderationActionRepository, releaseRequestRepository, novelService, chapterService,
 		notificationRepository, deviceTokenRepository, chapterNotifier, eventHub)
-	authorModerationService := service.NewAuthorModerationService(novelRepository, authorStrikeRepository, novelReportRepository, eventHub)
+	authorModerationService := service.NewAuthorModerationService(
+		novelRepository, novelCommentRepository, authorStrikeRepository, novelReportRepository,
+		userRepository, authorProfileRepository, notificationRepository, eventHub)
+	go runReportPurgeTicker(novelReportService)
 
 	rankingNotificationService := service.NewRankingNotificationService(
 		discoverSectionService, sectionMembershipRepository,
@@ -119,7 +128,7 @@ func main() {
 	adminNovelHandler := handler.NewAdminNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
 	adminChapterHandler := handler.NewAdminChapterHandler(chapterService, auditLogger)
 	authorNovelHandler := handler.NewAuthorNovelHandler(novelService, auditLogger, configuration.UploadsDirectory)
-	authorChapterHandler := handler.NewAuthorChapterHandler(chapterService, novelService, auditLogger)
+	authorChapterHandler := handler.NewAuthorChapterHandler(chapterService, novelService, novelReportRepository, auditLogger)
 	publicNovelHandler := handler.NewPublicNovelHandler(novelService, chapterService, readingHistoryService, novelReportService, configuration.JWTSecret)
 	novelCommentHandler := handler.NewNovelCommentHandler(novelCommentService, auditLogger, configuration.JWTSecret)
 	novelReportHandler := handler.NewNovelReportHandler(novelReportService, auditLogger, configuration.UploadsDirectory)
@@ -127,6 +136,8 @@ func main() {
 	broadcastService := service.NewBroadcastService(deviceTokenRepository, notificationRepository, chapterNotifier, eventHub)
 	notificationHandler := handler.NewNotificationHandler(notificationRepository, broadcastService, auditLogger)
 	genreHandler := handler.NewGenreHandler(genreRepository, auditLogger)
+	reportReasonHandler := handler.NewReportReasonHandler(reportReasonRepository, auditLogger)
+	reportReasonTypeHandler := handler.NewReportReasonTypeHandler(reportReasonTypeRepository, auditLogger)
 	discoverSectionHandler := handler.NewDiscoverSectionHandler(discoverSectionService, auditLogger, configuration.JWTSecret)
 	adminUserHandler := handler.NewAdminUserHandler(userRepository, auditLogger)
 	adminStatsHandler := handler.NewAdminStatsHandler(repository.NewStatsRepository(pool))
@@ -188,6 +199,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/novels/{id}/chapters", publicNovelHandler.Chapters)
 	mux.HandleFunc("GET /api/v1/chapters/{id}", publicNovelHandler.Chapter)
 	mux.HandleFunc("GET /api/v1/genres", genreHandler.List)
+	mux.HandleFunc("GET /api/v1/report-reasons", reportReasonHandler.List)
 	mux.HandleFunc("GET /api/v1/discover-sections", discoverSectionHandler.ListActive)
 	mux.HandleFunc("GET /api/v1/discover-sections/{key}/novels", discoverSectionHandler.Novels)
 
@@ -258,30 +270,58 @@ func main() {
 	mux.Handle("PUT /api/v1/author/chapters/{id}/schedule", requireAuthor(authorChapterHandler.Schedule))
 	mux.Handle("DELETE /api/v1/author/chapters/{id}", requireAuthor(authorChapterHandler.Delete))
 	mux.Handle("GET /api/v1/author/reports", requireAuthor(novelReportHandler.ListForOwner))
-	mux.Handle("POST /api/v1/author/reports/{id}/resubmit", requireAuthor(novelReportHandler.Resubmit))
+	mux.Handle("GET /api/v1/author/reports/{id}/release-requests", requireAuthor(novelReportHandler.ReleaseRequestsForOwner))
+	mux.Handle("GET /api/v1/author/reports/{id}/moderation-actions", requireAuthor(novelReportHandler.ModerationActionsForOwner))
+	mux.Handle("POST /api/v1/author/reports/{id}/release-requests", requireAuthor(novelReportHandler.SubmitReleaseRequest))
 
 	// Admin: comment moderation
 	mux.Handle("GET /api/v1/admin/novels/{id}/comments", requireAdmin(novelCommentHandler.List))
 	mux.Handle("DELETE /api/v1/admin/comments/{id}", requireAdmin(novelCommentHandler.AdminDelete))
 
-	// Admin: report moderation
+	// Admin: report moderation — moderation workflow v2's state machine.
+	// Opening a still-"submitted" report (Get) auto-transitions it to
+	// under_review; every other transition is its own dedicated action
+	// route rather than a generic status setter.
 	mux.Handle("GET /api/v1/admin/reports", requireAdmin(novelReportHandler.List))
 	mux.Handle("GET /api/v1/admin/reports/{id}", requireAdmin(novelReportHandler.Get))
-	mux.Handle("PUT /api/v1/admin/reports/{id}/status", requireAdmin(novelReportHandler.UpdateStatus))
+	mux.Handle("POST /api/v1/admin/reports/{id}/reject", requireAdmin(novelReportHandler.Reject))
+	mux.Handle("POST /api/v1/admin/reports/{id}/resolve", requireAdmin(novelReportHandler.ResolveDirect))
+	mux.Handle("POST /api/v1/admin/reports/{id}/hold-chapter", requireAdmin(novelReportHandler.HoldChapter))
+	mux.Handle("POST /api/v1/admin/reports/{id}/hold-novel", requireAdmin(novelReportHandler.HoldNovel))
+	mux.Handle("GET /api/v1/admin/reports/{id}/moderation-actions", requireAdmin(novelReportHandler.ModerationActions))
+	mux.Handle("GET /api/v1/admin/reports/{id}/release-requests", requireAdmin(novelReportHandler.ReleaseRequestsAdmin))
+	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/approve", requireAdmin(novelReportHandler.ApproveRelease))
+	mux.Handle("POST /api/v1/admin/reports/{id}/release-requests/{requestId}/reject", requireAdmin(novelReportHandler.RejectRelease))
+	mux.Handle("DELETE /api/v1/admin/reports/bulk", requireAdmin(novelReportHandler.AdminBulkDelete))
+	mux.Handle("DELETE /api/v1/admin/reports/{id}", requireAdmin(novelReportHandler.AdminDelete))
 
 	// Admin: author moderation (report detail view's author panel — see
 	// AuthorModerationService's doc comment on why this is name-keyed)
 	mux.Handle("GET /api/v1/admin/authors/{authorName}/novels", requireAdmin(authorModerationHandler.OtherNovels))
 	mux.Handle("GET /api/v1/admin/authors/{authorName}/strikes", requireAdmin(authorModerationHandler.Strikes))
 	mux.Handle("POST /api/v1/admin/authors/{authorName}/strikes", requireAdmin(authorModerationHandler.AddStrike))
-	mux.Handle("POST /api/v1/admin/authors/{authorName}/hide-novels", requireAdmin(authorModerationHandler.BulkHide))
 	mux.Handle("GET /api/v1/admin/authors/{authorName}/reports", requireAdmin(authorModerationHandler.Reports))
+	mux.Handle("GET /api/v1/admin/authors/{authorName}/profile", requireAdmin(authorModerationHandler.Profile))
 
 	// Admin: genres
 	mux.Handle("GET /api/v1/admin/genres", requireAdmin(genreHandler.List))
 	mux.Handle("POST /api/v1/admin/genres", requireAdmin(genreHandler.Create))
 	mux.Handle("PUT /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Update))
 	mux.Handle("DELETE /api/v1/admin/genres/{id}", requireAdmin(genreHandler.Delete))
+
+	// Admin: report reasons
+	mux.Handle("GET /api/v1/admin/report-reasons", requireAdmin(reportReasonHandler.List))
+	mux.Handle("POST /api/v1/admin/report-reasons", requireAdmin(reportReasonHandler.Create))
+	mux.Handle("PUT /api/v1/admin/report-reasons/reorder", requireAdmin(reportReasonHandler.Reorder))
+	mux.Handle("PUT /api/v1/admin/report-reasons/{id}", requireAdmin(reportReasonHandler.Update))
+	mux.Handle("DELETE /api/v1/admin/report-reasons/{id}", requireAdmin(reportReasonHandler.Delete))
+
+	// Admin: report reason types
+	mux.Handle("GET /api/v1/admin/report-reason-types", requireAdmin(reportReasonTypeHandler.List))
+	mux.Handle("POST /api/v1/admin/report-reason-types", requireAdmin(reportReasonTypeHandler.Create))
+	mux.Handle("PUT /api/v1/admin/report-reason-types/reorder", requireAdmin(reportReasonTypeHandler.Reorder))
+	mux.Handle("PUT /api/v1/admin/report-reason-types/{id}", requireAdmin(reportReasonTypeHandler.Update))
+	mux.Handle("DELETE /api/v1/admin/report-reason-types/{id}", requireAdmin(reportReasonTypeHandler.Delete))
 
 	// Admin: discover sections (Section Registry) + per-section overrides
 	mux.Handle("GET /api/v1/admin/discover-sections", requireAdmin(discoverSectionHandler.List))
@@ -325,13 +365,32 @@ func main() {
 
 	server := &http.Server{
 		Addr:    ":" + configuration.Port,
-		Handler: middleware.RequestLogger(globalRateLimiter.Middleware(mux)),
+		Handler: middleware.RequestLogger(rateLimitExcept(globalRateLimiter, "/uploads/", mux)),
 	}
 
 	log.Printf("novelora_backend listening on :%s", configuration.Port)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// rateLimitExcept applies limiter to every request except those whose
+// path starts with skipPrefix. Static asset serving (cover images,
+// evidence screenshots) is cheap, read-only, and a single content-heavy
+// screen legitimately fires dozens of these in parallel — counting them
+// against the same per-IP budget as real API calls made normal browsing
+// trip the limiter (a book grid alone was seen sending ~100 cover
+// requests in 6 seconds). The IPRateLimiter itself stays generic; this
+// route-specific exemption lives here with the rest of the route wiring.
+func rateLimitExcept(limiter *middleware.IPRateLimiter, skipPrefix string, next http.Handler) http.Handler {
+	limited := limiter.Middleware(next)
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, skipPrefix) {
+			next.ServeHTTP(responseWriter, request)
+			return
+		}
+		limited.ServeHTTP(responseWriter, request)
+	})
 }
 
 // runScheduledPublishTicker checks every minute for draft chapters
@@ -365,6 +424,24 @@ func runRankingDetectionTicker(rankingService *service.RankingNotificationServic
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		rankingService.DetectAndNotify(ctx)
 		cancel()
+	}
+}
+
+// runReportPurgeTicker hard-deletes reports soft-deleted more than 30
+// days ago (see NovelReportService.AdminDelete/PurgeOldDeleted). Once a
+// day is plenty — the 30-day threshold is never urgent to the hour.
+func runReportPurgeTicker(reports *service.NovelReportService) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		purged, err := reports.PurgeOldDeleted(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("reports: purge old deleted failed: %v", err)
+		} else if purged > 0 {
+			log.Printf("reports: purged %d report(s) deleted more than 30 days ago", purged)
+		}
 	}
 }
 

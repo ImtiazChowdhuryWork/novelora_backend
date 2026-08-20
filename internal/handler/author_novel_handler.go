@@ -58,12 +58,17 @@ func (authorNovelHandler *AuthorNovelHandler) List(responseWriter http.ResponseW
 	pageSize, _ := strconv.Atoi(query.Get("page_size"))
 
 	filter := repository.NovelListFilter{
-		Search:      query.Get("search"),
-		Status:      query.Get("status"),
-		Sort:        query.Get("sort"),
+		Search: query.Get("search"),
+		Status: query.Get("status"),
+		Sort:   query.Get("sort"),
 		OwnerUserID: &callerUserID,
-		Page:        page,
-		PageSize:    pageSize,
+		// An author needs to see a held novel, not have it silently
+		// vanish — IncludeHidden is safe here specifically because it's
+		// always paired with OwnerUserID, so this can only ever surface
+		// the caller's own hidden novels, never anyone else's.
+		IncludeHidden: true,
+		Page:          page,
+		PageSize:      pageSize,
 	}
 
 	novels, total, err := authorNovelHandler.novelService.List(request.Context(), filter)

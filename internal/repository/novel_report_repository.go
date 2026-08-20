@@ -20,10 +20,10 @@ var ErrReportNotFound = errors.New("report not found")
 // ListImages) — never by scanReport — same "attach after" shape as
 // NovelComment.Replies.
 type NovelReport struct {
-	ID             string
-	NovelID        string
-	NovelTitle     string
-	AuthorName     string
+	ID         string
+	NovelID    string
+	NovelTitle string
+	AuthorName string
 	// OwnerUserID is the novel's real author account, if it has one
 	// (nil for admin-uploaded/unclaimed novels) — see migration 0030.
 	// Lets the moderation panel key off the real account when possible
@@ -32,7 +32,13 @@ type NovelReport struct {
 	UserID         string
 	Username       string
 	Reason         string
-	Details        string
+	// ReasonType/ReasonTypeDescription snapshot Reason's parent
+	// ReportReasonType label/description at submit time — see
+	// migration 0041's comment. Powers the author dashboard's report
+	// type pill + its "i" info-tap.
+	ReasonType            string
+	ReasonTypeDescription string
+	Details               string
 	ChapterID      *string
 	ChapterTitle   *string
 	Status         string
@@ -59,6 +65,29 @@ type NovelReport struct {
 	// only ever offering the one-way action.
 	ChapterStatus *string
 	NovelHidden   bool
+	// ShareReporterEvidence is set once, at hold time (see
+	// NovelReportService.HoldChapter/HoldNovel) — an admin's explicit
+	// per-hold choice, never automatic, since the reporter's images may
+	// contain the reporter's own identifying content. Gates whether
+	// ListForOwner populates Images for the author; GetDetail (the
+	// admin's own view) always populates Images regardless. Lives on the
+	// report row (one flag, not one per hold) because the current state
+	// machine only ever lets a report be held once — under_review is the
+	// only status HoldChapter/HoldNovel accept from, and there's no path
+	// back to under_review after a hold. If that ever changes, this
+	// needs to move onto moderation_actions/moderation_action_images to
+	// stay correctly scoped to one hold instead of the whole report.
+	ShareReporterEvidence bool
+	// AdminEvidenceImages is the admin's own proof attached to whichever
+	// hold_chapter/hold_novel moderation action is this report's most
+	// recent — separate from the reporter's Images, always shown to the
+	// author once attached (the admin chose to attach them specifically
+	// to show the author, unlike the reporter's evidence). Populated by
+	// ModerationActionRepository.LatestHoldImages, not scanReport.
+	AdminEvidenceImages []string
+	// CoverURL is the reported novel's own cover — lets the admin
+	// Reports table show a thumbnail instead of just the title text.
+	CoverURL string
 }
 
 // NovelReportImage is one screenshot attached as evidence — up to
@@ -80,20 +109,20 @@ func NewNovelReportRepository(pool *pgxpool.Pool) *NovelReportRepository {
 
 const reportColumns = `
 	r.id, r.novel_id, n.title, n.author_name, n.owner_user_id, r.user_id, u.username,
-	r.reason, r.details, r.chapter_id, c.title,
+	r.reason, r.reason_type, r.reason_type_description, r.details, r.chapter_id, c.title,
 	r.status, r.resolution_note, r.author_response, r.reviewed_by, coalesce(reviewer.username, ''),
 	r.reviewed_at, r.created_at,
 	(SELECT count(*) FROM novel_report_images ri WHERE ri.report_id = r.id),
-	c.status, (n.deleted_at IS NOT NULL)`
+	c.status, (n.deleted_at IS NOT NULL), r.share_reporter_evidence, coalesce(n.cover_url, '')`
 
 func scanReport(row pgx.Row) (*NovelReport, error) {
 	report := &NovelReport{}
 	err := row.Scan(
 		&report.ID, &report.NovelID, &report.NovelTitle, &report.AuthorName, &report.OwnerUserID, &report.UserID, &report.Username,
-		&report.Reason, &report.Details, &report.ChapterID, &report.ChapterTitle,
+		&report.Reason, &report.ReasonType, &report.ReasonTypeDescription, &report.Details, &report.ChapterID, &report.ChapterTitle,
 		&report.Status, &report.ResolutionNote, &report.AuthorResponse, &report.ReviewedBy, &report.ReviewedByName,
 		&report.ReviewedAt, &report.CreatedAt, &report.ImageCount,
-		&report.ChapterStatus, &report.NovelHidden,
+		&report.ChapterStatus, &report.NovelHidden, &report.ShareReporterEvidence, &report.CoverURL,
 	)
 	return report, err
 }
@@ -106,14 +135,19 @@ const reportFromClause = `
 	LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by`
 
 // Create stores a report, optionally naming the specific chapter it's
-// about (nil = the whole novel). Evidence images are added separately
-// via AddImages, once the report row (and its id) exist.
-func (repository *NovelReportRepository) Create(ctx context.Context, novelID, userID, reason, details string, chapterID *string) (*NovelReport, error) {
+// about (nil = the whole novel). reasonType/reasonTypeDescription are
+// the reason's parent type, snapshotted by the caller (see
+// NovelReportService.Create) — see migration 0041's comment. Evidence
+// images are added separately via AddImages, once the report row
+// (and its id) exist.
+func (repository *NovelReportRepository) Create(
+	ctx context.Context, novelID, userID, reason, reasonType, reasonTypeDescription, details string, chapterID *string,
+) (*NovelReport, error) {
 	var reportID string
 	err := repository.pool.QueryRow(ctx, `
-		INSERT INTO novel_reports (novel_id, user_id, reason, details, chapter_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		novelID, userID, reason, details, chapterID,
+		INSERT INTO novel_reports (novel_id, user_id, reason, reason_type, reason_type_description, details, chapter_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		novelID, userID, reason, reasonType, reasonTypeDescription, details, chapterID,
 	).Scan(&reportID)
 	if err != nil {
 		return nil, fmt.Errorf("create report: %w", err)
@@ -173,7 +207,7 @@ func (repository *NovelReportRepository) ListImages(ctx context.Context, reportI
 func (repository *NovelReportRepository) List(ctx context.Context, status string, page, pageSize int) ([]*NovelReport, int, error) {
 	var total int
 	if err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports r WHERE ($1 = '' OR r.status = $1)",
+		"SELECT count(*) FROM novel_reports r WHERE r.deleted_at IS NULL AND ($1 = '' OR r.status = $1)",
 		status).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count reports: %w", err)
 	}
@@ -181,7 +215,7 @@ func (repository *NovelReportRepository) List(ctx context.Context, status string
 	rows, err := repository.pool.Query(ctx, `
 		SELECT `+reportColumns+`
 		FROM `+reportFromClause+`
-		WHERE ($1 = '' OR r.status = $1)
+		WHERE r.deleted_at IS NULL AND ($1 = '' OR r.status = $1)
 		ORDER BY r.created_at DESC
 		LIMIT $2 OFFSET $3`, status, pageSize, (page-1)*pageSize)
 	if err != nil {
@@ -200,13 +234,13 @@ func (repository *NovelReportRepository) List(ctx context.Context, status string
 	return reports, total, rows.Err()
 }
 
-// CountPending backs the Overview page's pending-reports tile — counts
-// every status that still needs an admin to look at it, not just the
-// initial "pending" (a resubmitted report needs attention just as much).
+// CountPending backs the Overview page's pending-reports tile — every
+// status short of the two terminal ones (resolved/rejected) still
+// needs an admin to look at it.
 func (repository *NovelReportRepository) CountPending(ctx context.Context) (int, error) {
 	var count int
 	err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports WHERE status IN ('pending', 'action_required', 'resubmitted')").Scan(&count)
+		"SELECT count(*) FROM novel_reports WHERE deleted_at IS NULL AND status NOT IN ('resolved', 'rejected')").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count pending reports: %w", err)
 	}
@@ -242,17 +276,17 @@ func (repository *NovelReportRepository) UpdateStatus(ctx context.Context, repor
 	return repository.GetByID(ctx, reportID)
 }
 
-// Resubmit is the author's side of the loop: they've fixed whatever
-// the admin's resolution_note asked for and want it re-reviewed.
-// Deliberately leaves resolution_note/reviewed_by/reviewed_at
-// untouched, so the admin's original instruction stays visible right
-// alongside the author's response.
-func (repository *NovelReportRepository) Resubmit(ctx context.Context, reportID, authorResponse string) (*NovelReport, error) {
-	commandTag, err := repository.pool.Exec(ctx, `
-		UPDATE novel_reports SET status = 'resubmitted', author_response = $2
-		WHERE id = $1`, reportID, authorResponse)
+// SetStatus is a bare status transition for moves that shouldn't touch
+// resolution_note/reviewed_by — UpdateStatus's non-pending branch
+// always overwrites both, which is right for an admin decision but
+// wrong for the automatic submitted->under_review step and the
+// author's own SubmitReleaseRequest (their explanation lives on
+// release_requests now, not this row).
+func (repository *NovelReportRepository) SetStatus(ctx context.Context, reportID, status string) (*NovelReport, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET status = $2 WHERE id = $1", reportID, status)
 	if err != nil {
-		return nil, fmt.Errorf("resubmit report: %w", err)
+		return nil, fmt.Errorf("set report status: %w", err)
 	}
 	if commandTag.RowsAffected() == 0 {
 		return nil, ErrReportNotFound
@@ -260,14 +294,26 @@ func (repository *NovelReportRepository) Resubmit(ctx context.Context, reportID,
 	return repository.GetByID(ctx, reportID)
 }
 
-// ListForOwner is the author-facing "Notices" list — every report
+// SetShareReporterEvidence records the admin's per-hold choice to show
+// the reporter's evidence images to the author — see HoldChapter/
+// HoldNovel. Only ever called with true (the column's own DEFAULT
+// false covers "no").
+func (repository *NovelReportRepository) SetShareReporterEvidence(ctx context.Context, reportID string, share bool) error {
+	if _, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET share_reporter_evidence = $2 WHERE id = $1", reportID, share); err != nil {
+		return fmt.Errorf("set share reporter evidence: %w", err)
+	}
+	return nil
+}
+
+// ListForOwner is the author-facing Reports list — every report
 // against a novel owned by ownerUserID, optionally filtered to one
 // status ("" = all).
 func (repository *NovelReportRepository) ListForOwner(ctx context.Context, ownerUserID, status string, page, pageSize int) ([]*NovelReport, int, error) {
 	var total int
 	if err := repository.pool.QueryRow(ctx, `
 		SELECT count(*) FROM novel_reports r JOIN novels n ON n.id = r.novel_id
-		WHERE n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)`,
+		WHERE r.deleted_at IS NULL AND n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)`,
 		ownerUserID, status).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count owner reports: %w", err)
 	}
@@ -275,7 +321,7 @@ func (repository *NovelReportRepository) ListForOwner(ctx context.Context, owner
 	rows, err := repository.pool.Query(ctx, `
 		SELECT `+reportColumns+`
 		FROM `+reportFromClause+`
-		WHERE n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)
+		WHERE r.deleted_at IS NULL AND n.owner_user_id = $1 AND ($2 = '' OR r.status = $2)
 		ORDER BY r.created_at DESC
 		LIMIT $3 OFFSET $4`, ownerUserID, status, pageSize, (page-1)*pageSize)
 	if err != nil {
@@ -321,7 +367,7 @@ func (repository *NovelReportRepository) ListForAuthorName(ctx context.Context, 
 
 // ListForOwnerAll is ListForAuthorName's real-account counterpart —
 // distinct from ListForOwner, which is the paginated author-dashboard
-// "Notices" list.
+// Reports list.
 func (repository *NovelReportRepository) ListForOwnerAll(ctx context.Context, ownerUserID string) ([]*NovelReport, error) {
 	rows, err := repository.pool.Query(ctx,
 		"SELECT "+reportColumns+" FROM "+reportFromClause+" WHERE n.owner_user_id = $1 ORDER BY r.created_at DESC",
@@ -357,19 +403,78 @@ func (repository *NovelReportRepository) HasReported(ctx context.Context, novelI
 	return exists, nil
 }
 
+// SoftDelete hides a report from every work-queue list (List,
+// ListForOwner, ListForUser, CountPending) without erasing it —
+// ListForAuthorName/ListForOwnerAll deliberately stay unfiltered, since
+// those back the admin's own "other reports against this author"
+// history panel, where a deleted report is still useful context. See
+// PurgeDeletedBefore for the eventual hard delete.
+func (repository *NovelReportRepository) SoftDelete(ctx context.Context, reportID string) error {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", reportID)
+	if err != nil {
+		return fmt.Errorf("soft delete report: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrReportNotFound
+	}
+	return nil
+}
+
+// BulkSoftDeleteByStatus soft-deletes every report currently in the
+// given status — the admin's "clear out old resolved/rejected clutter"
+// action. The caller (service) restricts status to terminal values
+// only; this method itself trusts what it's given.
+func (repository *NovelReportRepository) BulkSoftDeleteByStatus(ctx context.Context, status string) (int, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"UPDATE novel_reports SET deleted_at = now() WHERE deleted_at IS NULL AND status = $1", status)
+	if err != nil {
+		return 0, fmt.Errorf("bulk soft delete reports: %w", err)
+	}
+	return int(commandTag.RowsAffected()), nil
+}
+
+// PurgeDeletedBefore permanently removes any report soft-deleted before
+// cutoff — see runReportPurgeTicker in main.go. Evidence images cascade
+// via ON DELETE CASCADE, same as NovelReportRepository.Delete.
+func (repository *NovelReportRepository) PurgeDeletedBefore(ctx context.Context, cutoff time.Time) (int, error) {
+	commandTag, err := repository.pool.Exec(ctx,
+		"DELETE FROM novel_reports WHERE deleted_at IS NOT NULL AND deleted_at < $1", cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge deleted reports: %w", err)
+	}
+	return int(commandTag.RowsAffected()), nil
+}
+
+// HasActiveChapterHold reports whether a chapter is currently under an
+// admin hold the author hasn't cleared — either on hold outright, or
+// awaiting the admin's decision on a submitted release request. Either
+// way it isn't the admin's approval yet, so callers gating "can this
+// author republish this chapter" should treat both as blocking.
+func (repository *NovelReportRepository) HasActiveChapterHold(ctx context.Context, chapterID string) (bool, error) {
+	var exists bool
+	err := repository.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM novel_reports WHERE chapter_id = $1 AND status IN ('chapter_on_hold', 'pending_release_review'))",
+		chapterID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check has active chapter hold: %w", err)
+	}
+	return exists, nil
+}
+
 // ListForUser is the reporter's own report history — the app's "My
 // Reports" Profile page.
 func (repository *NovelReportRepository) ListForUser(ctx context.Context, userID string, page, pageSize int) ([]*NovelReport, int, error) {
 	var total int
 	if err := repository.pool.QueryRow(ctx,
-		"SELECT count(*) FROM novel_reports WHERE user_id = $1", userID).Scan(&total); err != nil {
+		"SELECT count(*) FROM novel_reports WHERE deleted_at IS NULL AND user_id = $1", userID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count user reports: %w", err)
 	}
 
 	rows, err := repository.pool.Query(ctx, `
 		SELECT `+reportColumns+`
 		FROM `+reportFromClause+`
-		WHERE r.user_id = $1
+		WHERE r.deleted_at IS NULL AND r.user_id = $1
 		ORDER BY r.created_at DESC
 		LIMIT $2 OFFSET $3`, userID, pageSize, (page-1)*pageSize)
 	if err != nil {
